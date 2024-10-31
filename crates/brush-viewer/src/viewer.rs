@@ -12,7 +12,7 @@ use brush_render::PrimaryBackend;
 use brush_train::train::TrainStepStats;
 use brush_train::{eval::EvalStats, train::TrainConfig};
 use burn::backend::Autodiff;
-use burn_wgpu::{RuntimeOptions, WgpuDevice};
+use burn_wgpu::WgpuDevice;
 use eframe::egui;
 use egui_tiles::{Container, Tile, TileId, Tiles};
 use glam::{Quat, Vec3};
@@ -95,11 +95,11 @@ fn process_loop(
 ) -> Pin<Box<impl Stream<Item = anyhow::Result<ViewerMessage>>>> {
     let stream = try_fn_stream(|emitter| async move {
         let _ = emitter.emit(ViewerMessage::PickFile).await;
-        log::warn!("Start picking file");
+        log::info!("Start picking file");
         let picked = rrfd::pick_file().await?;
         let name = picked.file_name();
 
-        log::warn!("Got file {name}");
+        log::info!("Picked file {name}");
 
         if name.contains(".ply") {
             let data = picked.read().await;
@@ -119,12 +119,7 @@ fn process_loop(
                     .await;
             }
         } else if name.contains(".zip") {
-            log::warn!("Start reading data");
-
             let data = picked.read().await;
-
-            log::warn!("Managed to read data");
-
             let _ = emitter
                 .emit(ViewerMessage::StartLoading { training: true })
                 .await;
@@ -254,17 +249,8 @@ impl Viewer {
     pub fn new(cc: &eframe::CreationContext) -> Self {
         let state = cc.wgpu_render_state.as_ref().unwrap();
 
-        // Run the burn backend on the egui WGPU device.
-        let device = burn::backend::wgpu::init_existing_device(
-            state.adapter.clone(),
-            state.device.clone(),
-            state.queue.clone(),
-            // Splatting workload is much more granular, so don't want to flush as often.
-            RuntimeOptions {
-                tasks_max: 64,
-                memory_config: burn_wgpu::MemoryConfiguration::ExclusivePages,
-            },
-        );
+        // For now just assume we're running on the default
+        let device = WgpuDevice::DefaultDevice;
 
         cfg_if::cfg_if! {
             if #[cfg(target_family = "wasm")] {

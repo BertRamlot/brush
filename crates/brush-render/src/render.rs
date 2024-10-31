@@ -9,7 +9,7 @@ use crate::{
         GatherGrads, GetTileBinEdges, MapGaussiansToIntersect, ProjectBackwards, ProjectSplats,
         ProjectVisible, Rasterize, RasterizeBackwards,
     },
-    PrimaryBackend,
+    validate_not_nan, PrimaryBackend,
 };
 
 use brush_kernel::{
@@ -188,6 +188,13 @@ fn render_forward(
         );
     });
 
+    validate_not_nan(
+        projected_splats.clone(),
+        [num_points, projected_size],
+        Some(num_visible.clone()),
+        "Projected splats",
+    );
+
     let cum_tiles_hit = tracing::trace_span!("PrefixSum", sync_burn = true).in_scope(|| {
         // TODO: Only need to do this up to num_visible gaussians really.
         prefix_sum(num_tiles_hit)
@@ -299,7 +306,7 @@ fn render_forward(
 
     // Record the final visible splat per tile.
     let final_index =
-        create_tensor::<u32, 2, _>([img_size.x as usize, img_size.y as usize], device, client);
+        create_tensor::<u32, 2, _>([img_size.y as usize, img_size.x as usize], device, client);
 
     if !raster_u32 {
         handles.push(final_index.handle.clone().binding());
@@ -310,6 +317,15 @@ fn render_forward(
             Rasterize::task(raster_u32),
             calc_cube_count([img_size.x, img_size.y], Rasterize::WORKGROUP_SIZE),
             handles,
+        );
+    }
+
+    if !raster_u32 {
+        validate_not_nan(
+            out_img.clone(),
+            [img_size.y as usize, img_size.x as usize, out_dim],
+            None,
+            "Out img",
         );
     }
 
@@ -477,6 +493,13 @@ impl Backward<PrimaryBackend, 7> for RenderBackwards {
         let client = &v_output.client;
         let device = &v_output.device;
 
+        validate_not_nan(
+            v_output.clone(),
+            [img_size.y as usize, img_size.x as usize, img_dimgs[2]],
+            None,
+            "v_output",
+        );
+
         let means = checkpointer.retrieve_node_output::<FloatTensor<PrimaryBackend>>(state.means);
         let quats = checkpointer.retrieve_node_output::<FloatTensor<PrimaryBackend>>(state.quats);
         let log_scales =
@@ -485,6 +508,7 @@ impl Backward<PrimaryBackend, 7> for RenderBackwards {
             checkpointer.retrieve_node_output::<FloatTensor<PrimaryBackend>>(state.raw_opac);
 
         let num_points = means.shape.dims[0];
+        let num_visible = aux.num_visible;
 
         let (v_xys, v_xys_global, v_xys_norm, v_conics, v_coeffs, v_opacities) = {
             let tile_bounds = uvec2(
@@ -522,21 +546,37 @@ impl Backward<PrimaryBackend, 7> for RenderBackwards {
                 );
             });
 
-            let v_coeffs = PrimaryBackend::float_zeros(
-                [
-                    num_points,
-                    sh_coeffs_for_degree(state.sh_degree) as usize,
-                    3,
-                ]
-                .into(),
-                device,
+            validate_not_nan(
+                v_xys_local.clone(),
+                [num_points, 2],
+                Some(num_visible.clone()),
+                "v_xys_local",
             );
+            validate_not_nan(
+                v_conics.clone(),
+                [num_points, 3],
+                Some(num_visible.clone()),
+                "v_conics",
+            );
+            validate_not_nan(
+                v_colors.clone(),
+                [num_points, 4],
+                Some(num_visible.clone()),
+                "v_colors",
+            );
+
+            let v_coeffs_shape = [
+                num_points,
+                sh_coeffs_for_degree(state.sh_degree) as usize,
+                3,
+            ];
+            let v_coeffs = PrimaryBackend::float_zeros(v_coeffs_shape.into(), device);
             let v_opacities = PrimaryBackend::float_zeros([num_points].into(), device);
 
             let _span = tracing::trace_span!("GatherGrads", sync_burn = true).entered();
 
             let num_vis_wg = create_dispatch_buffer(
-                bitcast_tensor(aux.num_visible.clone()),
+                bitcast_tensor(num_visible.clone()),
                 GatherGrads::WORKGROUP_SIZE,
             );
 
@@ -560,6 +600,11 @@ impl Backward<PrimaryBackend, 7> for RenderBackwards {
                     ],
                 );
             }
+
+            validate_not_nan(v_coeffs.clone(), v_coeffs_shape, None, "v_coeffs");
+            validate_not_nan(v_opacities.clone(), [num_points], None, "v_opacities");
+            validate_not_nan(v_xys_global.clone(), [num_points, 2], None, "v_xys_global");
+            validate_not_nan(v_xys_norm.clone(), [num_points], None, "v_xys_norm");
 
             (
                 v_xys_local,
@@ -597,6 +642,9 @@ impl Backward<PrimaryBackend, 7> for RenderBackwards {
                 ],
             );
         });
+        validate_not_nan(v_means.clone(), [num_points, 3], None, "v_means");
+        validate_not_nan(v_scales.clone(), [num_points, 3], None, "v_scales");
+        validate_not_nan(v_quats.clone(), [num_points, 4], None, "v_quats");
 
         // Register gradients for parent nodes (This code is already skipped entirely
         // if no parent nodes require gradients).
@@ -668,7 +716,7 @@ mod tests {
             glam::vec2(0.5, 0.5),
         );
         let img_size = glam::uvec2(32, 32);
-        let device = WgpuDevice::BestAvailable;
+        let device = WgpuDevice::DefaultDevice;
         let num_points = 8;
         let means = Tensor::<DiffBack, 2, _>::zeros([num_points, 3], &device);
         let xy_dummy = Tensor::<DiffBack, 2, _>::zeros([num_points, 2], &device);
@@ -702,7 +750,7 @@ mod tests {
 
     #[test]
     fn test_reference() -> Result<()> {
-        let device = WgpuDevice::BestAvailable;
+        let device = WgpuDevice::DefaultDevice;
 
         let crab_img = image::open("./test_cases/crab.png")?;
         // Convert the image to RGB format

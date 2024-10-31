@@ -33,7 +33,7 @@ fn generate_bench_data() -> anyhow::Result<()> {
     <DiffBack as burn::prelude::Backend>::seed(4);
     let num_points = 2usize.pow(21); //  Maxmimum number of splats to bench.
 
-    let device = WgpuDevice::BestAvailable;
+    let device = WgpuDevice::DefaultDevice;
     let means = Tensor::<DiffBack, 2>::random(
         [num_points, 3],
         burn::tensor::Distribution::Uniform(-0.5, 0.5),
@@ -143,7 +143,7 @@ fn bench_general(
         generate_bench_data().expect("Failed to generate bench data");
     }
 
-    let device = WgpuDevice::BestAvailable;
+    let device = WgpuDevice::DefaultDevice;
     let mut buffer = Vec::new();
     let _ = File::open("./test_cases/bench_data.safetensors")
         .unwrap()
@@ -179,7 +179,7 @@ fn bench_general(
                 let _ = out.0.mean().backward();
             }
             // Wait for GPU work.
-            <PrimaryBackend as burn::prelude::Backend>::sync(&WgpuDevice::BestAvailable);
+            <PrimaryBackend as burn::prelude::Backend>::sync(&WgpuDevice::DefaultDevice);
         });
     } else {
         // Run with no autodiff graph.
@@ -190,7 +190,7 @@ fn bench_general(
                 let _ = splats.render(&camera, resolution, glam::vec3(0.0, 0.0, 0.0), true);
             }
             // Wait for GPU work.
-            <PrimaryBackend as burn::prelude::Backend>::sync(&WgpuDevice::BestAvailable);
+            <PrimaryBackend as burn::prelude::Backend>::sync(&WgpuDevice::DefaultDevice);
         });
     }
 }

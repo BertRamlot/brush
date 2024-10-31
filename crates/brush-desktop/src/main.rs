@@ -1,17 +1,25 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
 fn main() -> anyhow::Result<()> {
-    let wgpu_options = brush_viewer::wgpu_config::get_config();
-
     #[cfg(not(target_family = "wasm"))]
     {
+        let wgpu_options =
+            async_std::task::block_on(brush_viewer::wgpu_config::create_wgpu_egui_config());
+
         env_logger::init();
+
+        // NB: Load carrying icon. egui at head fails when no icon is included
+        // as the built-in one is git-lfs which cargo doesn't clone properly.
+        let icon = eframe::icon_data::from_png_bytes(&include_bytes!("../assets/icon-256.png")[..])
+            .unwrap();
 
         let native_options = eframe::NativeOptions {
             // Build app display.
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size(egui::Vec2::new(1450.0, 900.0))
-                .with_active(true),
+                .with_active(true)
+                .with_icon(std::sync::Arc::new(icon)),
+
             // Need a slightly more careful wgpu init to support burn.
             wgpu_options,
             ..Default::default()
@@ -30,11 +38,6 @@ fn main() -> anyhow::Result<()> {
         use wasm_bindgen::JsCast;
         eframe::WebLogger::init(log::LevelFilter::Debug).ok();
 
-        let web_options = eframe::WebOptions {
-            wgpu_options,
-            ..Default::default()
-        };
-
         let document = web_sys::window().unwrap().document().unwrap();
         let canvas = document
             .get_element_by_id("main_canvas")
@@ -44,6 +47,12 @@ fn main() -> anyhow::Result<()> {
 
         // On wasm, run as a local task.
         async_std::task::spawn_local(async {
+            let wgpu_options = brush_viewer::wgpu_config::create_wgpu_egui_config().await;
+            let web_options = eframe::WebOptions {
+                wgpu_options,
+                ..Default::default()
+            };
+
             eframe::WebRunner::new()
                 .start(
                     canvas,

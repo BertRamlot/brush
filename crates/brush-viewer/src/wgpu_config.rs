@@ -1,17 +1,27 @@
-use eframe::egui_wgpu::WgpuConfiguration;
-use std::sync::Arc;
+use burn_wgpu::{AutoGraphicsApi, RuntimeOptions};
+use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup};
 
-pub fn get_config() -> WgpuConfiguration {
+pub async fn create_wgpu_setup() -> burn_wgpu::WgpuSetup {
+    burn_wgpu::init_setup_async::<AutoGraphicsApi>(
+        &burn_wgpu::WgpuDevice::DefaultDevice,
+        RuntimeOptions {
+            tasks_max: 64,
+            memory_config: burn_wgpu::MemoryConfiguration::ExclusivePages,
+        },
+    )
+    .await
+}
+
+pub async fn create_wgpu_egui_config() -> WgpuConfiguration {
+    let setup = create_wgpu_setup().await;
+
     WgpuConfiguration {
-        device_descriptor: Arc::new(|adapter| wgpu::DeviceDescriptor {
-            label: Some("egui+burn wgpu device"),
-            required_features: adapter.features(),
-            required_limits: adapter.limits(),
-            // cube already batches allocations.
-            memory_hints: wgpu::MemoryHints::Performance,
-        }),
-        supported_backends: wgpu::Backends::PRIMARY,
-        power_preference: wgpu::PowerPreference::HighPerformance,
+        wgpu_setup: WgpuSetup::Existing {
+            instance: setup.instance,
+            adapter: setup.adapter,
+            device: setup.device,
+            queue: setup.queue,
+        },
         ..Default::default()
     }
 }

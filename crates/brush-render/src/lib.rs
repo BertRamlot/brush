@@ -2,7 +2,8 @@
 #![allow(clippy::single_range_in_vec_init)]
 use brush_kernel::bitcast_tensor;
 use burn::backend::Autodiff;
-use burn::tensor::{ElementConversion, Int, Tensor};
+use burn::prelude::Tensor;
+use burn::tensor::{ElementConversion, Int, Shape, TensorPrimitive};
 use burn_jit::JitBackend;
 use burn_wgpu::{JitTensor, WgpuRuntime};
 use camera::Camera;
@@ -93,3 +94,121 @@ pub trait AutodiffBackend: burn::tensor::backend::AutodiffBackend + Backend {}
 impl<B: Backend> AutodiffBackend for Autodiff<B> where burn::backend::Autodiff<B>: Backend {}
 
 pub type PrimaryBackend = JitBackend<WgpuRuntime, f32, i32>;
+pub static VALIDATION_TASK_HANDLE: std::sync::OnceLock<
+    async_std::channel::Sender<ValidationMessage>,
+> = std::sync::OnceLock::new();
+
+pub fn init_validation_task() {
+    async fn assert_not_nan<const D: usize>(
+        tensor: JitTensor<WgpuRuntime, f32>,
+        shape: [usize; D],
+        max: Option<JitTensor<WgpuRuntime, u32>>,
+        description: String,
+    ) {
+        let tensor = Tensor::<PrimaryBackend, 1>::from_primitive(TensorPrimitive::Float(tensor));
+        let tensor = tensor.reshape::<D, _>(Shape::new(shape));
+
+        let tensor = if let Some(max) = max {
+            let max_data = Tensor::<PrimaryBackend, D, Int>::from_primitive(bitcast_tensor(max));
+            let index = max_data.into_scalar_async().await.elem::<u32>();
+
+            if index == 0 {
+                return;
+            }
+
+            tensor.slice([0..index as usize])
+        } else {
+            tensor
+        };
+
+        if tensor.contains_nan().into_scalar_async().await {
+            log::error!("Tensor contains NaN: {}", description);
+        }
+    }
+
+    let _ = VALIDATION_TASK_HANDLE.get_or_init(|| {
+        let (sender, receiver) = async_std::channel::unbounded();
+
+        let fut = async move {
+            while let Ok(msg) = receiver.recv().await {
+                match msg {
+                    ValidationMessage::ValidateNotNan {
+                        tensor,
+                        shape,
+                        max,
+                        description,
+                    } => {
+                        if shape.len() == 1 {
+                            assert_not_nan::<1>(
+                                tensor,
+                                shape.try_into().unwrap(),
+                                max,
+                                description,
+                            )
+                            .await;
+                        } else if shape.len() == 2 {
+                            assert_not_nan::<2>(
+                                tensor,
+                                shape.try_into().unwrap(),
+                                max,
+                                description,
+                            )
+                            .await;
+                        } else if shape.len() == 3 {
+                            assert_not_nan::<3>(
+                                tensor,
+                                shape.try_into().unwrap(),
+                                max,
+                                description,
+                            )
+                            .await;
+                        } else if shape.len() == 4 {
+                            assert_not_nan::<4>(
+                                tensor,
+                                shape.try_into().unwrap(),
+                                max,
+                                description,
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
+        };
+        #[cfg(target_arch = "wasm32")]
+        async_std::task::spawn_local(fut);
+        #[cfg(not(target_arch = "wasm32"))]
+        async_std::task::spawn(fut);
+
+        sender
+    });
+}
+
+#[derive(Debug)]
+pub enum ValidationMessage {
+    ValidateNotNan {
+        tensor: JitTensor<WgpuRuntime, f32>,
+        shape: Vec<usize>,
+        max: Option<JitTensor<WgpuRuntime, u32>>,
+        description: String,
+    },
+}
+
+pub fn validate_not_nan<const D: usize>(
+    tensor: JitTensor<WgpuRuntime, f32>,
+    shape: [usize; D],
+    max: Option<JitTensor<WgpuRuntime, u32>>,
+    description: &str,
+) {
+    init_validation_task();
+    VALIDATION_TASK_HANDLE
+        .get()
+        .unwrap()
+        .try_send(ValidationMessage::ValidateNotNan {
+            tensor,
+            shape: shape.to_vec(),
+            max,
+            description: description.to_owned(),
+        })
+        .unwrap();
+}
