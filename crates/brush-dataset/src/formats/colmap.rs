@@ -1,8 +1,9 @@
 use std::{future::Future, sync::Arc};
 
-use super::{DataStream, DatasetZip, LoadDatasetArgs, LoadInitArgs};
-use crate::{stream_fut_parallel, Dataset};
+use super::{DataStream, DatasetZip, LoadDatasetArgs};
+use crate::{stream_fut_parallel, Dataset, LoadInitArgs};
 use anyhow::{Context, Result};
+use async_fn_stream::try_fn_stream;
 use brush_render::{
     camera::{self, Camera},
     gaussian_splats::Splats,
@@ -108,16 +109,22 @@ fn read_views(
     Ok(handles)
 }
 
-pub(crate) fn load_dataset(
-    archive: DatasetZip,
+pub(crate) fn load_dataset<B: Backend>(
+    mut archive: DatasetZip,
+    init_args: &LoadInitArgs,
     load_args: &LoadDatasetArgs,
-) -> Result<DataStream<Dataset>> {
-    let handles = read_views(archive, load_args)?;
+    device: &B::Device,
+) -> Result<(DataStream<Splats<B>>, DataStream<Dataset>)> {
+    let init_args = init_args.clone();
+
+    let handles = read_views(archive.clone(), load_args)?;
 
     let mut train_views = vec![];
     let mut eval_views = vec![];
 
     let load_args = load_args.clone();
+    let device = device.clone();
+
     let mut i = 0;
     let stream = stream_fut_parallel(handles).map(move |view| {
         // I cannot wait for let chains.
@@ -135,45 +142,39 @@ pub(crate) fn load_dataset(
         Ok(Dataset::from_views(train_views.clone(), eval_views.clone()))
     });
 
-    Ok(Box::pin(stream))
-}
+    let init_stream = try_fn_stream(|emitter| async move {
+        let (is_binary, base_path) =
+            if let Some(path) = archive.find_base_path("sparse/0/cameras.bin") {
+                (true, path)
+            } else if let Some(path) = archive.find_base_path("sparse/0/cameras.txt") {
+                (false, path)
+            } else {
+                anyhow::bail!("No COLMAP data found (either text or binary.")
+            };
 
-pub(crate) fn load_initial_splat<B: Backend>(
-    mut archive: DatasetZip,
-    device: &B::Device,
-    load_args: &LoadInitArgs,
-) -> Result<Splats<B>> {
-    let (is_binary, base_path) = if let Some(path) = archive.find_base_path("sparse/0/cameras.bin")
-    {
-        (true, path)
-    } else if let Some(path) = archive.find_base_path("sparse/0/cameras.txt") {
-        (false, path)
-    } else {
-        anyhow::bail!("No COLMAP data found (either text or binary.")
-    };
+        let points_path = if is_binary {
+            base_path.join("sparse/0/points3D.bin")
+        } else {
+            base_path.join("sparse/0/points3D.txt")
+        };
 
-    let points_path = if is_binary {
-        base_path.join("sparse/0/points3D.bin")
-    } else {
-        base_path.join("sparse/0/points3D.txt")
-    };
+        // Extract COLMAP sfm points.
+        let points_data = {
+            let mut points_file = archive.file_at_path(&points_path)?;
+            colmap_reader::read_points3d(&mut points_file, is_binary)?
+        };
 
-    // Extract COLMAP sfm points.
-    let points_data = {
-        let mut points_file = archive.file_at_path(&points_path)?;
-        colmap_reader::read_points3d(&mut points_file, is_binary)?
-    };
+        let positions = points_data.values().map(|p| p.xyz).collect();
+        let colors = points_data
+            .values()
+            .map(|p| Vec3::new(p.rgb[0] as f32, p.rgb[1] as f32, p.rgb[2] as f32) / 255.0)
+            .collect();
 
-    let positions = points_data.values().map(|p| p.xyz).collect();
-    let colors = points_data
-        .values()
-        .map(|p| Vec3::new(p.rgb[0] as f32, p.rgb[1] as f32, p.rgb[2] as f32) / 255.0)
-        .collect();
+        let init_ply = Splats::from_point_cloud(positions, colors, init_args.sh_degree, &device);
+        emitter.emit(init_ply).await;
+        Ok(())
+    });
+    let init_stream = Box::pin(init_stream);
 
-    Ok(Splats::from_point_cloud(
-        positions,
-        colors,
-        load_args.sh_degree,
-        device,
-    ))
+    Ok((init_stream, Box::pin(stream)))
 }

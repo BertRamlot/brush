@@ -21,10 +21,11 @@ pub(crate) struct LoadDataPanel {
 impl LoadDataPanel {
     pub(crate) fn new() -> Self {
         Self {
-            // High resolution performance just isn't great at the moment... limit this for now by default.
-            max_train_resolution: None,
+            // Super high resolutions are a bit sketchy. Limit to at least
+            // some size.
+            max_train_resolution: Some(1920),
             max_frames: None,
-            eval_split_every: Some(8),
+            eval_split_every: None,
             sh_degree: 3,
             quality: Quality::Normal,
             proxy: false,

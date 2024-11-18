@@ -49,23 +49,27 @@ pub(crate) fn train_loop<T: AsyncRead + Unpin + 'static>(
 
         // Load initial splats if included
         let mut initial_splats = None;
-        let mut splat_stream =
-            brush_dataset::load_initial_splat(zip_data.clone(), &device, &load_init_args);
-
-        if let Some(splat_stream) = splat_stream.as_mut() {
-            while let Some(splats) = splat_stream.next().await {
-                let splats = splats?;
-                let msg = ViewerMessage::Splats {
-                    iter: 0,
-                    splats: Box::new(splats.valid()),
-                };
-                emitter.emit(msg).await;
-                initial_splats = Some(splats);
-            }
-        }
 
         let mut dataset = Dataset::empty();
-        let mut data_stream = brush_dataset::load_dataset(zip_data.clone(), &load_data_args)?;
+        let (mut splat_stream, mut data_stream) = brush_dataset::load_dataset(
+            zip_data.clone(),
+            &load_init_args,
+            &load_data_args,
+            &device,
+        )?;
+
+        // Read initial splats if any.
+        while let Some(splats) = splat_stream.next().await {
+            let splats = splats?;
+            let msg = ViewerMessage::Splats {
+                iter: 0,
+                splats: Box::new(splats.valid()),
+            };
+            emitter.emit(msg).await;
+            initial_splats = Some(splats);
+        }
+
+        // Read dataset stream.
         while let Some(d) = data_stream.next().await {
             dataset = d?;
 

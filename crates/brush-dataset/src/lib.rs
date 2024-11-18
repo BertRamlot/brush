@@ -4,7 +4,7 @@ pub mod splat_export;
 pub mod splat_import;
 pub mod zip;
 
-pub use formats::{load_dataset, load_initial_splat};
+pub use formats::load_dataset;
 
 use anyhow::Result;
 use async_fn_stream::fn_stream;

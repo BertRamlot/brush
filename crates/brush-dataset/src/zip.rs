@@ -55,11 +55,45 @@ pub struct DatasetZip {
     archive: ZipArchive<Cursor<ZipData>>,
 }
 
+// TODO: This is all awfully ad-hoc.
 impl DatasetZip {
     pub fn from_data(data: Vec<u8>) -> ZipResult<Self> {
         let zip_data = ZipData::from(data);
         let archive = ZipArchive::new(zip_data.open_for_read())?;
         Ok(Self { archive })
+    }
+
+    pub(crate) fn file_names(&self) -> impl Iterator<Item = &str> + '_ {
+        self.archive
+            .file_names()
+            // stupic macOS.
+            .filter(|p| !p.contains("__MACOSX"))
+    }
+
+    pub(crate) fn find_with_extension(
+        &self,
+        extension: &str,
+        contains: &str,
+    ) -> anyhow::Result<PathBuf> {
+        let names: Vec<_> = self
+            .file_names()
+            .filter(|name| name.ends_with(extension))
+            .collect();
+
+        if names.len() == 1 {
+            return Ok(Path::new(names[0]).to_owned());
+        }
+
+        let names: Vec<_> = names
+            .iter()
+            .filter(|name| name.contains(contains))
+            .collect();
+
+        if names.len() == 1 {
+            return Ok(Path::new(names[0]).to_owned());
+        }
+
+        anyhow::bail!("Failed to find file ending in {extension} maybe containing {contains}.");
     }
 
     pub(crate) fn file_at_path<'a>(&'a mut self, path: &Path) -> Result<ZipFile<'a>, ZipError> {
