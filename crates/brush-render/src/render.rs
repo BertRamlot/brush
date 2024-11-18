@@ -42,6 +42,10 @@ pub fn sh_degree_from_coeffs(coeffs_per_channel: u32) -> u32 {
     }
 }
 
+pub fn rgb_to_sh(rgb: f32) -> f32 {
+    (rgb - 0.5) / shaders::gather_grads::SH_C0
+}
+
 pub(crate) fn render_forward(
     camera: &Camera,
     img_size: glam::UVec2,
@@ -52,6 +56,11 @@ pub(crate) fn render_forward(
     raw_opacities: JitTensor<WgpuRuntime, f32>,
     raster_u32: bool,
 ) -> (JitTensor<WgpuRuntime, f32>, RenderAux<InnerWgpu>) {
+    assert!(
+        img_size[0] > 0 && img_size[1] > 0,
+        "Can't render 0 sized images"
+    );
+
     let device = &means.device.clone();
     let client = means.client.clone();
 

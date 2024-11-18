@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use async_fn_stream::try_fn_stream;
-use brush_render::Backend;
+use brush_render::{render::rgb_to_sh, Backend};
 use glam::{Quat, Vec3};
 use ply_rs::{
     parser::Parser,
@@ -38,48 +38,42 @@ impl PropertyAccess for GaussianData {
     }
 
     fn set_property(&mut self, key: &str, property: Property) {
-        let value = if let Property::Float(v) = property {
-            v
-        } else if let Property::UChar(v) = property {
-            let scale = match key {
-                "red" => 255.0,
-                "green" => 255.0,
-                "blue" => 255.0,
-                _ => {
-                    log::error!("Invalid ply property. {key} as a uchar is not supported.");
-                    return;
+        if let Property::Float(value) = property {
+            match key {
+                "x" => self.means[0] = value,
+                "y" => self.means[1] = value,
+                "z" => self.means[2] = value,
+                "scale_0" => self.scale[0] = value,
+                "scale_1" => self.scale[1] = value,
+                "scale_2" => self.scale[2] = value,
+                "opacity" => self.opacity = value,
+                "rot_0" => self.rotation.w = value,
+                "rot_1" => self.rotation.x = value,
+                "rot_2" => self.rotation.y = value,
+                "rot_3" => self.rotation.z = value,
+                "f_dc_0" => self.sh_dc[0] = value,
+                "f_dc_1" => self.sh_dc[1] = value,
+                "f_dc_2" => self.sh_dc[2] = value,
+                _ if key.starts_with("f_rest_") => {
+                    if let Ok(idx) = key["f_rest_".len()..].parse::<u32>() {
+                        if idx >= self.sh_coeffs_rest.len() as u32 {
+                            self.sh_coeffs_rest.resize(idx as usize + 1, 0.0);
+                        }
+                        self.sh_coeffs_rest[idx as usize] = value;
+                    }
                 }
-            };
-            v as f32 / scale
+                _ => (),
+            }
+        } else if let Property::UChar(value) = property {
+            match key {
+                "red" => self.sh_dc[0] = rgb_to_sh(value as f32 / 255.0),
+                "green" => self.sh_dc[1] = rgb_to_sh(value as f32 / 255.0),
+                "blue" => self.sh_dc[2] = rgb_to_sh(value as f32 / 255.0),
+                _ => {}
+            }
         } else {
             return;
         };
-
-        match key {
-            "x" => self.means[0] = value,
-            "y" => self.means[1] = value,
-            "z" => self.means[2] = value,
-            "scale_0" => self.scale[0] = value,
-            "scale_1" => self.scale[1] = value,
-            "scale_2" => self.scale[2] = value,
-            "opacity" => self.opacity = value,
-            "rot_0" => self.rotation.w = value,
-            "rot_1" => self.rotation.x = value,
-            "rot_2" => self.rotation.y = value,
-            "rot_3" => self.rotation.z = value,
-            "f_dc_0" | "red" => self.sh_dc[0] = value,
-            "f_dc_1" | "green" => self.sh_dc[1] = value,
-            "f_dc_2" | "blue" => self.sh_dc[2] = value,
-            _ if key.starts_with("f_rest_") => {
-                if let Ok(idx) = key["f_rest_".len()..].parse::<u32>() {
-                    if idx >= self.sh_coeffs_rest.len() as u32 {
-                        self.sh_coeffs_rest.resize(idx as usize + 1, 0.0);
-                    }
-                    self.sh_coeffs_rest[idx as usize] = value;
-                }
-            }
-            _ => (),
-        }
     }
 
     fn get_float(&self, key: &str) -> Option<f32> {
@@ -199,7 +193,7 @@ pub fn load_splat_from_ply<T: AsyncRead + Unpin + 'static, B: Backend>(
                         scales.push(splat.scale);
                     }
                     if let Some(rotation) = rotation.as_mut() {
-                        rotation.push(splat.rotation);
+                        rotation.push(splat.rotation.normalize());
                     }
                     if let Some(opacity) = opacity.as_mut() {
                         opacity.push(splat.opacity);

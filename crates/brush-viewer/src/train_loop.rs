@@ -64,6 +64,7 @@ pub(crate) fn train_loop<T: AsyncRead + Unpin + 'static>(
             };
             emitter.emit(msg).await;
             initial_splats = Some(splats);
+            println!("Setup initial splats!!!");
         }
 
         // Read dataset stream.

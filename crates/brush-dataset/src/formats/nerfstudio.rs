@@ -26,8 +26,6 @@ struct SyntheticScene {
     // Nerfstudio doesn't mention this in their format? But fine to include really.
     ply_file_path: Option<String>,
 
-    // Nerfstudio format
-    //
     /// Focal length x
     fl_x: Option<f64>,
     /// Focal length y
@@ -146,14 +144,11 @@ fn read_transforms_file(
                 let focal_x = frame
                     .fl_x
                     .or(scene.fl_x)
-                    .or(scene.camera_angle_x)
+                    .or(scene.camera_angle_x.map(|fx| fov_to_focal(fx, w)))
                     .context("Must have a focal length of some kind.")?;
 
                 // Read fov y or derive it from the input.
-                let focal_y = frame
-                    .fl_y
-                    .or(scene.fl_y)
-                    .unwrap_or(fov_to_focal(focal_x, w));
+                let focal_y = frame.fl_y.or(scene.fl_y).unwrap_or(focal_x);
 
                 let fovx = focal_to_fov(focal_x, w);
                 let fovy = focal_to_fov(focal_y, h);
@@ -216,8 +211,6 @@ pub fn read_dataset<B: Backend>(
         // and eval, atm this skips "transforms_test.json" even if it's there.
 
         for (i, handle) in train_handles.into_iter().enumerate() {
-            log::info!("Getting train img");
-
             if let Some(eval_period) = load_args.eval_split_every {
                 // Include extra eval images only when the dataset doesn't have them.
                 if i % eval_period == 0 && val_stream.is_some() {
@@ -252,6 +245,7 @@ pub fn read_dataset<B: Backend>(
         if let Some(init) = train_scene.ply_file_path {
             let init_path = transforms_path.parent().unwrap().join(init);
             let ply_data = archive.read_bytes_at_path(&init_path);
+
             if let Ok(ply_data) = ply_data {
                 let splat_stream = load_splat_from_ply(Cursor::new(ply_data), device.clone());
 

@@ -7,6 +7,7 @@ use async_fn_stream::try_fn_stream;
 use brush_render::{
     camera::{self, Camera},
     gaussian_splats::Splats,
+    render::rgb_to_sh,
     Backend,
 };
 use brush_train::scene::SceneView;
@@ -162,13 +163,14 @@ pub(crate) fn load_dataset<B: Backend>(
         };
 
         let positions = points_data.values().map(|p| p.xyz).collect();
+
         let colors = points_data
             .values()
             .flat_map(|p| {
                 [
-                    p.rgb[0] as f32 / 255.0,
-                    p.rgb[1] as f32 / 255.0,
-                    p.rgb[2] as f32 / 255.0,
+                    rgb_to_sh(p.rgb[0] as f32 / 255.0),
+                    rgb_to_sh(p.rgb[1] as f32 / 255.0),
+                    rgb_to_sh(p.rgb[2] as f32 / 255.0),
                 ]
             })
             .collect();
