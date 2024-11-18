@@ -1,9 +1,8 @@
+use std::collections::HashSet;
+
 use async_fn_stream::try_fn_stream;
-use brush_render::{render::sh_coeffs_for_degree, Backend};
-use burn::{
-    module::{Param, ParamId},
-    tensor::{Tensor, TensorData},
-};
+use brush_render::Backend;
+use glam::{Quat, Vec3};
 use ply_rs::{
     parser::Parser,
     ply::{Property, PropertyAccess},
@@ -12,14 +11,14 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio_stream::Stream;
 use tracing::trace_span;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use brush_render::gaussian_splats::Splats;
 
 pub(crate) struct GaussianData {
-    pub(crate) means: [f32; 3],
-    pub(crate) scale: [f32; 3],
+    pub(crate) means: Vec3,
+    pub(crate) scale: Vec3,
     pub(crate) opacity: f32,
-    pub(crate) rotation: [f32; 4],
+    pub(crate) rotation: Quat,
     pub(crate) sh_dc: [f32; 3],
     // NB: This is in the inria format, aka [channels, coeffs]
     // not [coeffs, channels].
@@ -29,42 +28,57 @@ pub(crate) struct GaussianData {
 impl PropertyAccess for GaussianData {
     fn new() -> Self {
         GaussianData {
-            means: [0.0; 3],
-            scale: [0.0; 3],
+            means: Vec3::ZERO,
+            scale: Vec3::ZERO,
             opacity: 0.0,
-            rotation: [0.0; 4],
+            rotation: Quat::IDENTITY,
             sh_dc: [0.0, 0.0, 0.0],
             sh_coeffs_rest: Vec::new(),
         }
     }
 
     fn set_property(&mut self, key: &str, property: Property) {
-        if let Property::Float(v) = property {
-            match key {
-                "x" => self.means[0] = v,
-                "y" => self.means[1] = v,
-                "z" => self.means[2] = v,
-                "scale_0" => self.scale[0] = v,
-                "scale_1" => self.scale[1] = v,
-                "scale_2" => self.scale[2] = v,
-                "opacity" => self.opacity = v,
-                "rot_0" => self.rotation[0] = v,
-                "rot_1" => self.rotation[1] = v,
-                "rot_2" => self.rotation[2] = v,
-                "rot_3" => self.rotation[3] = v,
-                "f_dc_0" => self.sh_dc[0] = v,
-                "f_dc_1" => self.sh_dc[1] = v,
-                "f_dc_2" => self.sh_dc[2] = v,
-                _ if key.starts_with("f_rest_") => {
-                    if let Ok(idx) = key["f_rest_".len()..].parse::<u32>() {
-                        if idx >= self.sh_coeffs_rest.len() as u32 {
-                            self.sh_coeffs_rest.resize(idx as usize + 1, 0.0);
-                        }
-                        self.sh_coeffs_rest[idx as usize] = v;
-                    }
+        let value = if let Property::Float(v) = property {
+            v
+        } else if let Property::UChar(v) = property {
+            let scale = match key {
+                "red" => 255.0,
+                "green" => 255.0,
+                "blue" => 255.0,
+                _ => {
+                    log::error!("Invalid ply property. {key} as a uchar is not supported.");
+                    return;
                 }
-                _ => (),
+            };
+            v as f32 / scale
+        } else {
+            return;
+        };
+
+        match key {
+            "x" => self.means[0] = value,
+            "y" => self.means[1] = value,
+            "z" => self.means[2] = value,
+            "scale_0" => self.scale[0] = value,
+            "scale_1" => self.scale[1] = value,
+            "scale_2" => self.scale[2] = value,
+            "opacity" => self.opacity = value,
+            "rot_0" => self.rotation.w = value,
+            "rot_1" => self.rotation.x = value,
+            "rot_2" => self.rotation.y = value,
+            "rot_3" => self.rotation.z = value,
+            "f_dc_0" | "red" => self.sh_dc[0] = value,
+            "f_dc_1" | "green" => self.sh_dc[1] = value,
+            "f_dc_2" | "blue" => self.sh_dc[2] = value,
+            _ if key.starts_with("f_rest_") => {
+                if let Ok(idx) = key["f_rest_".len()..].parse::<u32>() {
+                    if idx >= self.sh_coeffs_rest.len() as u32 {
+                        self.sh_coeffs_rest.resize(idx as usize + 1, 0.0);
+                    }
+                    self.sh_coeffs_rest[idx as usize] = value;
+                }
             }
+            _ => (),
         }
     }
 
@@ -77,10 +91,10 @@ impl PropertyAccess for GaussianData {
             "scale_1" => Some(self.scale[1]),
             "scale_2" => Some(self.scale[2]),
             "opacity" => Some(self.opacity),
-            "rot_0" => Some(self.rotation[0]),
-            "rot_1" => Some(self.rotation[1]),
-            "rot_2" => Some(self.rotation[2]),
-            "rot_3" => Some(self.rotation[3]),
+            "rot_0" => Some(self.rotation.w),
+            "rot_1" => Some(self.rotation.x),
+            "rot_2" => Some(self.rotation.y),
+            "rot_3" => Some(self.rotation.z),
             "f_dc_0" => Some(self.sh_dc[0]),
             "f_dc_1" => Some(self.sh_dc[1]),
             "f_dc_2" => Some(self.sh_dc[2]),
@@ -93,63 +107,6 @@ impl PropertyAccess for GaussianData {
             }
             _ => None,
         }
-    }
-}
-
-fn update_splats<B: Backend>(
-    splats: &mut Option<Splats<B>>,
-    means: Vec<f32>,
-    sh_coeffs: Vec<f32>,
-    rotation: Vec<f32>,
-    raw_opacities: Vec<f32>,
-    log_scales: Vec<f32>,
-    device: &B::Device,
-) {
-    let n_splats = means.len() / 3;
-    let n_coeffs = sh_coeffs.len() / n_splats;
-
-    let means = Tensor::from_data(TensorData::new(means, [n_splats, 3]), device).require_grad();
-    let sh_coeffs = Tensor::from_data(
-        TensorData::new(sh_coeffs, [n_splats, n_coeffs / 3, 3]),
-        device,
-    )
-    .require_grad();
-    let rotations =
-        Tensor::from_data(TensorData::new(rotation, [n_splats, 4]), device).require_grad();
-    let raw_opacities =
-        Tensor::from_data(TensorData::new(raw_opacities, [n_splats]), device).require_grad();
-    let log_scales =
-        Tensor::from_data(TensorData::new(log_scales, [n_splats, 3]), device).require_grad();
-
-    if let Some(splats) = splats.as_mut() {
-        Splats::map_param(&mut splats.means, |x| {
-            Tensor::cat(vec![x, means.clone()], 0)
-        });
-        Splats::map_param(&mut splats.rotation, |x| {
-            Tensor::cat(vec![x, rotations.clone()], 0)
-        });
-        Splats::map_param(&mut splats.sh_coeffs, |x| {
-            Tensor::cat(vec![x, sh_coeffs.clone()], 0)
-        });
-        Splats::map_param(&mut splats.raw_opacity, |x| {
-            Tensor::cat(vec![x, raw_opacities.clone()], 0)
-        });
-        Splats::map_param(&mut splats.log_scales, |x| {
-            Tensor::cat(vec![x, log_scales.clone()], 0)
-        });
-        splats.norm_rotations();
-    } else {
-        let mut init = Splats {
-            means: Param::initialized(ParamId::new(), means),
-            sh_coeffs: Param::initialized(ParamId::new(), sh_coeffs),
-            rotation: Param::initialized(ParamId::new(), rotations),
-            raw_opacity: Param::initialized(ParamId::new(), raw_opacities),
-            log_scales: Param::initialized(ParamId::new(), log_scales),
-            xys_dummy: Tensor::zeros([n_splats, 2], device).require_grad(),
-        };
-        init.norm_rotations();
-        // Create a new splat instance if it hasn't been initialzized yet.
-        *splats = Some(init);
     }
 }
 
@@ -174,7 +131,6 @@ pub fn load_splat_from_ply<T: AsyncRead + Unpin + 'static, B: Backend>(
 ) -> impl Stream<Item = Result<Splats<B>>> + 'static {
     // set up a reader, in this case a file.
     let mut reader = BufReader::new(reader);
-    let mut splats: Option<Splats<B>> = None;
 
     let update_every = 10000;
     let _span = trace_span!("Read splats").entered();
@@ -185,19 +141,14 @@ pub fn load_splat_from_ply<T: AsyncRead + Unpin + 'static, B: Backend>(
 
         for element in &header.elements {
             if element.name == "vertex" {
-                let min_props = [
-                    "x", "y", "z", "scale_0", "scale_1", "scale_2", "opacity", "rot_0", "rot_1",
-                    "rot_2", "rot_3", "f_dc_0", "f_dc_1", "f_dc_2",
-                ];
+                let properties: HashSet<_> =
+                    element.properties.iter().map(|x| x.name.clone()).collect();
 
-                if !min_props
-                    .iter()
-                    .all(|p| element.properties.iter().any(|x| &x.name == p))
-                {
+                if ["x", "y", "z"].into_iter().any(|p| !properties.contains(p)) {
                     Err(anyhow::anyhow!("Invalid splat ply. Missing properties!"))?
                 }
 
-                let n_sh_coeffs = (1 + element
+                let n_sh_coeffs = (3 + element
                     .properties
                     .iter()
                     .filter_map(|x| {
@@ -208,11 +159,18 @@ pub fn load_splat_from_ply<T: AsyncRead + Unpin + 'static, B: Backend>(
                     .max()
                     .unwrap_or(0)) as usize;
 
-                let mut means = Vec::with_capacity(update_every * 3);
-                let mut sh_coeffs = Vec::with_capacity(update_every * n_sh_coeffs);
-                let mut rotation = Vec::with_capacity(update_every * 4);
-                let mut opacity = Vec::with_capacity(update_every);
-                let mut scales = Vec::with_capacity(update_every * 3);
+                let mut means = Vec::with_capacity(element.count);
+                let mut scales = properties
+                    .contains("scale_0")
+                    .then(|| Vec::with_capacity(element.count));
+                let mut rotation = properties
+                    .contains("rot_0")
+                    .then(|| Vec::with_capacity(element.count));
+                let mut sh_coeffs = (properties.contains("f_dc_0") || properties.contains("red"))
+                    .then(|| Vec::with_capacity(element.count * n_sh_coeffs));
+                let mut opacity = properties
+                    .contains("opacity")
+                    .then(|| Vec::with_capacity(element.count));
 
                 for i in 0..element.count {
                     let splat = match header.encoding {
@@ -233,37 +191,35 @@ pub fn load_splat_from_ply<T: AsyncRead + Unpin + 'static, B: Backend>(
                         }
                     };
 
-                    let mut sh_coeffs_interleaved =
+                    let sh_coeffs_interleaved =
                         interleave_coeffs(splat.sh_dc, &splat.sh_coeffs_rest);
 
-                    // Limit the number of imported SH channels for now.
-                    let max_sh_len = sh_coeffs_for_degree(3) as usize * 3;
-
-                    if sh_coeffs_interleaved.len() > max_sh_len {
-                        sh_coeffs_interleaved.truncate(max_sh_len);
+                    means.push(splat.means);
+                    if let Some(scales) = scales.as_mut() {
+                        scales.push(splat.scale);
                     }
-
-                    means.extend(splat.means);
-                    sh_coeffs.extend(sh_coeffs_interleaved);
-                    rotation.extend(splat.rotation);
-                    opacity.push(splat.opacity);
-                    scales.extend(splat.scale);
+                    if let Some(rotation) = rotation.as_mut() {
+                        rotation.push(splat.rotation);
+                    }
+                    if let Some(opacity) = opacity.as_mut() {
+                        opacity.push(splat.opacity);
+                    }
+                    if let Some(sh_coeffs) = sh_coeffs.as_mut() {
+                        sh_coeffs.extend(sh_coeffs_interleaved);
+                    }
 
                     // Occasionally send some updated splats.
                     if i % update_every == update_every - 1 {
-                        update_splats(
-                            &mut splats,
-                            std::mem::take(&mut means),
-                            std::mem::take(&mut sh_coeffs),
-                            std::mem::take(&mut rotation),
-                            std::mem::take(&mut opacity),
-                            std::mem::take(&mut scales),
+                        let splats = Splats::from_raw(
+                            means.clone(),
+                            rotation.clone(),
+                            scales.clone(),
+                            sh_coeffs.clone(),
+                            opacity.clone(),
                             &device,
                         );
 
-                        emitter
-                            .emit(splats.clone().context("Failed to update splats")?)
-                            .await;
+                        emitter.emit(splats).await;
                     }
 
                     // Ocassionally yield.
@@ -272,25 +228,13 @@ pub fn load_splat_from_ply<T: AsyncRead + Unpin + 'static, B: Backend>(
                     }
                 }
 
-                update_splats(
-                    &mut splats,
-                    means,
-                    sh_coeffs,
-                    rotation,
-                    opacity,
-                    scales,
-                    &device,
-                );
+                let splats = Splats::from_raw(means, rotation, scales, sh_coeffs, opacity, &device);
 
-                if let Some(splats) = splats.as_ref() {
-                    if splats.num_splats() == 0 {
-                        Err(anyhow::anyhow!("No splats found"))?;
-                    }
+                if splats.num_splats() == 0 {
+                    Err(anyhow::anyhow!("No splats found"))?;
                 }
 
-                emitter
-                    .emit(splats.clone().context("Invalid ply file.")?)
-                    .await;
+                emitter.emit(splats).await;
             }
         }
 

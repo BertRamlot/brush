@@ -1,6 +1,7 @@
 use anyhow::anyhow;
 use brush_render::{gaussian_splats::Splats, Backend};
 use burn::tensor::DataError;
+use glam::{Quat, Vec3};
 use ply_rs::{
     ply::{self, Ply, PropertyDef, PropertyType, ScalarType},
     writer::Writer,
@@ -42,19 +43,19 @@ async fn read_splat_data<B: Backend>(splats: Splats<B>) -> Result<Vec<GaussianDa
             let sh_coeffs_rest = [&sh_red[1..], &sh_green[1..], &sh_blue[1..]].concat();
 
             GaussianData {
-                means: [means[i * 3], means[i * 3 + 1], means[i * 3 + 2]],
-                scale: [
+                means: Vec3::new(means[i * 3], means[i * 3 + 1], means[i * 3 + 2]),
+                scale: Vec3::new(
                     log_scales[i * 3],
                     log_scales[i * 3 + 1],
                     log_scales[i * 3 + 2],
-                ],
+                ),
                 opacity: opacities[i],
-                rotation: [
-                    rotations[i * 4],
+                rotation: Quat::from_xyzw(
                     rotations[i * 4 + 1],
                     rotations[i * 4 + 2],
                     rotations[i * 4 + 3],
-                ],
+                    rotations[i * 4],
+                ),
                 sh_dc,
                 sh_coeffs_rest,
             }

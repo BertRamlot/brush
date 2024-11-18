@@ -1,13 +1,13 @@
 use crate::{
     bounding_box::BoundingBox, camera::Camera, render::sh_coeffs_for_degree,
-    safetensor_utils::safetensor_to_burn, shaders, Backend,
+    safetensor_utils::safetensor_to_burn, Backend,
 };
 use burn::{
     config::Config,
     module::{Module, Param, ParamId},
-    tensor::{activation::sigmoid, Device, Shape, Tensor, TensorPrimitive},
+    tensor::{activation::sigmoid, Shape, Tensor, TensorData, TensorPrimitive},
 };
-use glam::Vec3;
+use glam::{Quat, Vec3};
 use kiddo::{KdTree, SquaredEuclidean};
 use rand::Rng;
 use safetensors::SafeTensors;
@@ -56,93 +56,127 @@ impl<B: Backend> Splats<B> {
             positions.push(Vec3::new(x, y, z));
         }
 
-        let mut colors: Vec<Vec3> = Vec::with_capacity(num_points);
+        let mut colors: Vec<f32> = Vec::with_capacity(num_points);
         for _ in 0..num_points {
             let r = rng.gen_range(0.0..1.0);
             let g = rng.gen_range(0.0..1.0);
             let b = rng.gen_range(0.0..1.0);
-            colors.push(Vec3::new(r, g, b));
+            colors.push(r);
+            colors.push(g);
+            colors.push(b);
         }
 
-        Splats::from_point_cloud(positions, colors, config.sh_degree, device)
+        Splats::from_raw(positions, None, None, Some(colors), None, device)
     }
 
-    pub fn from_point_cloud(
-        positions: Vec<Vec3>,
-        colors: Vec<Vec3>,
-        sh_degree: u32,
+    pub fn from_raw(
+        means: Vec<Vec3>,
+        rotations: Option<Vec<Quat>>,
+        log_scales: Option<Vec<Vec3>>,
+        sh_coeffs: Option<Vec<f32>>,
+        raw_opacities: Option<Vec<f32>>,
         device: &B::Device,
     ) -> Splats<B> {
-        let num_points = positions.len();
-        let positions_arr: Vec<_> = positions.into_iter().map(|v| [v.x, v.y, v.z]).collect();
-        let means: Vec<f32> = positions_arr.iter().copied().flatten().collect();
-        let means = Tensor::<B, 1>::from_floats(means.as_slice(), device).reshape([num_points, 3]);
+        let n_splats = means.len();
 
-        let colors: Vec<f32> = colors.iter().flat_map(|v| [v.x, v.y, v.z]).collect();
-        let colors =
-            Tensor::<B, 1>::from_floats(colors.as_slice(), device).reshape([num_points, 1, 3]);
+        let means_tensor: Vec<f32> = means.iter().flat_map(|v| [v.x, v.y, v.z]).collect();
+        let means_tensor = Tensor::from_data(TensorData::new(means_tensor, [n_splats, 3]), device);
 
-        let sh_coeffs_dc = (colors - 0.5) / shaders::gather_grads::SH_C0;
-
-        let sh_num = sh_coeffs_for_degree(sh_degree);
-        let sh_coeffs = if sh_num == 1 {
-            // Can't concatenate with 0 sized tensor.
-            sh_coeffs_dc
+        let rotations = if let Some(rotations) = rotations {
+            let rotations: Vec<f32> = rotations
+                .into_iter()
+                .flat_map(|v| [v.w, v.x, v.y, v.z])
+                .collect();
+            Tensor::from_data(TensorData::new(rotations, [n_splats, 4]), device)
         } else {
-            Tensor::cat(
-                vec![
-                    sh_coeffs_dc,
-                    Tensor::zeros([num_points, sh_num as usize - 1, 3], device),
-                ],
-                1,
-            )
+            Tensor::<_, 1>::from_floats([1.0, 0.0, 0.0, 0.0], device)
+                .unsqueeze::<2>()
+                .repeat_dim(0, n_splats)
         };
 
-        let init_rotation = Tensor::<_, 1>::from_floats([1.0, 0.0, 0.0, 0.0], device)
-            .unsqueeze::<2>()
-            .repeat_dim(0, num_points);
+        let log_scales = if let Some(log_scales) = log_scales {
+            let log_scales: Vec<f32> = log_scales
+                .into_iter()
+                .flat_map(|v| [v.x, v.y, v.z])
+                .collect();
+            Tensor::from_data(TensorData::new(log_scales, [n_splats, 3]), device)
+        } else {
+            let tree_pos: Vec<[f32; 3]> = means.iter().map(|v| [v.x, v.y, v.z]).collect();
+            let tree: KdTree<_, 3> = (&tree_pos).into();
+            let extents: Vec<_> = tree_pos
+                .iter()
+                .map(|p| {
+                    // Get average of 3 nearest squared distances.
+                    tree.nearest_n::<SquaredEuclidean>(p, 3)
+                        .iter()
+                        .map(|x| x.distance)
+                        .sum::<f32>()
+                        .sqrt()
+                        / 3.0
+                })
+                .collect();
 
-        let raw_opacities = Tensor::ones(Shape::new([num_points]), device) * inverse_sigmoid(0.1);
+            Tensor::<B, 1>::from_floats(extents.as_slice(), device)
+                .reshape([n_splats, 1])
+                .repeat_dim(1, 3)
+                .clamp_min(0.00001)
+                .log()
+        };
 
-        let tree: KdTree<_, 3> = (&positions_arr).into();
-        let extents: Vec<_> = positions_arr
-            .iter()
-            .map(|p| {
-                // Get average of 3 nearest squared distances.
-                tree.nearest_n::<SquaredEuclidean>(p, 3)
-                    .iter()
-                    .map(|x| x.distance)
-                    .sum::<f32>()
-                    .sqrt()
-                    / 3.0
-            })
-            .collect();
+        let sh_coeffs = if let Some(sh_coeffs) = sh_coeffs {
+            let n_coeffs = sh_coeffs.len() / n_splats;
+            Tensor::from_data(
+                TensorData::new(sh_coeffs, [n_splats, n_coeffs / 3, 3]),
+                device,
+            )
+        } else {
+            Tensor::<_, 1>::from_floats([0.5, 0.5, 0.5], device)
+                .unsqueeze::<3>()
+                .repeat_dim(0, n_splats)
+        };
 
-        let scales = Tensor::<B, 1>::from_floats(extents.as_slice(), device)
-            .reshape([num_points, 1])
-            .repeat_dim(1, 3);
+        let raw_opacities = if let Some(raw_opacities) = raw_opacities {
+            Tensor::from_data(TensorData::new(raw_opacities, [n_splats]), device).require_grad()
+        } else {
+            Tensor::ones(Shape::new([n_splats]), device) * inverse_sigmoid(0.1)
+        };
 
-        let log_scales = scales.clamp(0.0000001, f32::MAX).log();
-
-        Self::from_data(
-            means,
-            sh_coeffs,
-            init_rotation,
-            raw_opacities,
+        Self::from_tensor_data(
+            means_tensor,
+            rotations,
             log_scales,
-            device,
+            sh_coeffs,
+            raw_opacities,
         )
     }
 
-    pub fn from_data(
+    pub fn with_min_sh_degree(mut self, sh_degree: u32) -> Self {
+        let n_coeffs = sh_coeffs_for_degree(sh_degree) as usize;
+
+        let [n, c, _] = self.sh_coeffs.dims();
+
+        if self.sh_coeffs.dims()[1] < n_coeffs {
+            Splats::map_param(&mut self.sh_coeffs, |coeffs| {
+                let device = coeffs.device();
+                Tensor::cat(
+                    vec![coeffs, Tensor::zeros([n, n_coeffs - c, 3], &device)],
+                    1,
+                )
+            });
+        }
+
+        self
+    }
+
+    pub fn from_tensor_data(
         means: Tensor<B, 2>,
-        sh_coeffs: Tensor<B, 3>,
         rotation: Tensor<B, 2>,
-        raw_opacity: Tensor<B, 1>,
         log_scales: Tensor<B, 2>,
-        device: &Device<B>,
+        sh_coeffs: Tensor<B, 3>,
+        raw_opacity: Tensor<B, 1>,
     ) -> Self {
         let num_points = means.shape().dims[0];
+        let device = means.device();
         Splats {
             means: Param::initialized(ParamId::new(), means.detach().require_grad()),
             sh_coeffs: Param::initialized(
@@ -152,7 +186,7 @@ impl<B: Backend> Splats<B> {
             rotation: Param::initialized(ParamId::new(), rotation.detach().require_grad()),
             raw_opacity: Param::initialized(ParamId::new(), raw_opacity.detach().require_grad()),
             log_scales: Param::initialized(ParamId::new(), log_scales.detach().require_grad()),
-            xys_dummy: Tensor::zeros([num_points, 2], device).require_grad(),
+            xys_dummy: Tensor::zeros([num_points, 2], &device).require_grad(),
         }
     }
 
@@ -207,19 +241,12 @@ impl<B: Backend> Splats<B> {
     }
 
     pub fn from_safetensors(tensors: &SafeTensors, device: &B::Device) -> anyhow::Result<Self> {
-        let means = safetensor_to_burn::<B, 2>(tensors.tensor("means")?, device);
-        let log_scales = safetensor_to_burn::<B, 2>(tensors.tensor("scales")?, device);
-        let sh_coeffs = safetensor_to_burn::<B, 3>(tensors.tensor("coeffs")?, device);
-        let quats = safetensor_to_burn::<B, 2>(tensors.tensor("quats")?, device);
-        let raw_opacity = safetensor_to_burn::<B, 1>(tensors.tensor("opacities")?, device);
-
-        Ok(Self::from_data(
-            means,
-            sh_coeffs,
-            quats,
-            raw_opacity,
-            log_scales,
-            device,
+        Ok(Self::from_tensor_data(
+            safetensor_to_burn::<B, 2>(tensors.tensor("means")?, device),
+            safetensor_to_burn::<B, 2>(tensors.tensor("scales")?, device),
+            safetensor_to_burn::<B, 2>(tensors.tensor("quats")?, device),
+            safetensor_to_burn::<B, 3>(tensors.tensor("coeffs")?, device),
+            safetensor_to_burn::<B, 1>(tensors.tensor("opacities")?, device),
         ))
     }
 }

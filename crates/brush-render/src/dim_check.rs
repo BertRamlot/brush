@@ -14,7 +14,7 @@ pub(crate) struct DimCheck<'a, R: JitRuntime> {
     device: Option<R::Device>,
 }
 
-impl<'a, R: JitRuntime> DimCheck<'a, R> {
+impl<R: JitRuntime> DimCheck<'_, R> {
     pub fn new() -> Self {
         DimCheck {
             bound: HashMap::new(),

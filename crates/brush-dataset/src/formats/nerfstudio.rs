@@ -1,6 +1,6 @@
 use super::DatasetZip;
 use super::LoadDatasetArgs;
-use crate::LoadInitArgs;
+use crate::splat_import::load_splat_from_ply;
 use crate::{clamp_img_to_max_size, DataStream, Dataset};
 use anyhow::Context;
 use anyhow::Result;
@@ -10,10 +10,12 @@ use brush_render::gaussian_splats::Splats;
 use brush_render::Backend;
 use brush_train::scene::SceneView;
 use std::future::Future;
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio_stream::StreamExt;
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone)]
 #[allow(unused)] // not reading camera distortions yet.
 struct SyntheticScene {
     // Simple synthetic nerf camera model.
@@ -55,7 +57,7 @@ struct SyntheticScene {
     frames: Vec<FrameData>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone)]
 #[allow(unused)] // not reading camera distortions yet.
 struct FrameData {
     // Nerfstudio format
@@ -111,11 +113,9 @@ fn read_transforms_file(
                 let transform_matrix: Vec<f32> =
                     frame.transform_matrix.iter().flatten().copied().collect();
                 let mut transform = glam::Mat4::from_cols_slice(&transform_matrix).transpose();
-                // Swap basis to go from z-up, left handed (a la OpenCV) to our kernel format
-                // (right-handed, y-down).
+                // Swap basis to match camera format and reconstrunstion ply (if included).
                 transform.y_axis *= -1.0;
                 transform.z_axis *= -1.0;
-                transform = glam::Mat4::from_rotation_x(std::f32::consts::PI / 2.0) * transform;
                 let (_, rotation, translation) = transform.to_scale_rotation_translation();
 
                 // Read the imageat the specified path, fallback to default .png extension.
@@ -177,28 +177,39 @@ fn read_transforms_file(
 
 pub fn read_dataset<B: Backend>(
     mut archive: DatasetZip,
-    init_args: &LoadInitArgs,
     load_args: &LoadDatasetArgs,
     device: &B::Device,
 ) -> Result<(DataStream<Splats<B>>, DataStream<Dataset>)> {
     log::info!("Loading nerf synthetic dataset");
 
     let transforms_path = archive.find_with_extension(".json", "_train")?;
-    let train_scene = serde_json::from_reader(archive.file_at_path(&transforms_path)?)?;
+    let train_scene: SyntheticScene =
+        serde_json::from_reader(archive.file_at_path(&transforms_path)?)?;
+    let train_handles = read_transforms_file(
+        train_scene.clone(),
+        transforms_path.clone(),
+        archive.clone(),
+        load_args,
+    )?;
 
     let load_args = load_args.clone();
+    let mut archive_move = archive.clone();
+
+    let transforms_path_clone = transforms_path.clone();
 
     let dataset_stream = try_fn_stream(|emitter| async move {
         let mut train_views = vec![];
         let mut eval_views = vec![];
 
-        let load_args = load_args.clone();
-        let train_handles =
-            read_transforms_file(train_scene, transforms_path, archive.clone(), &load_args)?;
+        let eval_trans_path = archive_move.find_with_extension(".json", "_val")?;
 
-        let transforms_path = archive.find_with_extension(".json", "_train")?;
-        let val_scene = serde_json::from_reader(archive.file_at_path(&transforms_path)?)?;
-        let val_stream = read_transforms_file(val_scene, transforms_path, archive, &load_args).ok();
+        // If a seperate eval file is specified, read it.
+        let val_stream = if eval_trans_path != transforms_path_clone {
+            let val_scene = serde_json::from_reader(archive_move.file_at_path(&eval_trans_path)?)?;
+            read_transforms_file(val_scene, eval_trans_path, archive_move, &load_args).ok()
+        } else {
+            None
+        };
 
         log::info!("Loading transforms_test.json");
         // Not entirely sure yet if we want to report stats on both test
@@ -236,10 +247,22 @@ pub fn read_dataset<B: Backend>(
     });
 
     let device = device.clone();
-    let splat_stream = try_fn_stream(|_| async move {
-        // Not implemented atm.
-        let _ = init_args;
-        let _ = device;
+
+    let splat_stream = try_fn_stream(|emitter| async move {
+        if let Some(init) = train_scene.ply_file_path {
+            let init_path = transforms_path.parent().unwrap().join(init);
+            let ply_data = archive.read_bytes_at_path(&init_path);
+            if let Ok(ply_data) = ply_data {
+                let splat_stream = load_splat_from_ply(Cursor::new(ply_data), device.clone());
+
+                let mut splat_stream = std::pin::pin!(splat_stream);
+
+                // If sucesfully extracted, sent this splat as an initial splat.
+                while let Some(Ok(splat)) = splat_stream.next().await {
+                    emitter.emit(splat).await;
+                }
+            }
+        }
         Ok(())
     });
 

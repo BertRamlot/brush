@@ -1,7 +1,7 @@
 use std::{future::Future, sync::Arc};
 
 use super::{DataStream, DatasetZip, LoadDatasetArgs};
-use crate::{stream_fut_parallel, Dataset, LoadInitArgs};
+use crate::{stream_fut_parallel, Dataset};
 use anyhow::{Context, Result};
 use async_fn_stream::try_fn_stream;
 use brush_render::{
@@ -10,7 +10,6 @@ use brush_render::{
     Backend,
 };
 use brush_train::scene::SceneView;
-use glam::Vec3;
 use tokio_stream::StreamExt;
 
 fn read_views(
@@ -111,12 +110,9 @@ fn read_views(
 
 pub(crate) fn load_dataset<B: Backend>(
     mut archive: DatasetZip,
-    init_args: &LoadInitArgs,
     load_args: &LoadDatasetArgs,
     device: &B::Device,
 ) -> Result<(DataStream<Splats<B>>, DataStream<Dataset>)> {
-    let init_args = init_args.clone();
-
     let handles = read_views(archive.clone(), load_args)?;
 
     let mut train_views = vec![];
@@ -130,6 +126,7 @@ pub(crate) fn load_dataset<B: Backend>(
         // I cannot wait for let chains.
         if let Some(eval_period) = load_args.eval_split_every {
             if i % eval_period == 0 {
+                log::info!("Adding split eval view");
                 eval_views.push(view?);
             } else {
                 train_views.push(view?);
@@ -167,10 +164,16 @@ pub(crate) fn load_dataset<B: Backend>(
         let positions = points_data.values().map(|p| p.xyz).collect();
         let colors = points_data
             .values()
-            .map(|p| Vec3::new(p.rgb[0] as f32, p.rgb[1] as f32, p.rgb[2] as f32) / 255.0)
+            .flat_map(|p| {
+                [
+                    p.rgb[0] as f32 / 255.0,
+                    p.rgb[1] as f32 / 255.0,
+                    p.rgb[2] as f32 / 255.0,
+                ]
+            })
             .collect();
 
-        let init_ply = Splats::from_point_cloud(positions, colors, init_args.sh_degree, &device);
+        let init_ply = Splats::from_raw(positions, None, None, Some(colors), None, &device);
         emitter.emit(init_ply).await;
         Ok(())
     });
