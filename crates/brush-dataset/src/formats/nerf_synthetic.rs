@@ -12,12 +12,18 @@ use std::sync::Arc;
 
 #[derive(serde::Deserialize)]
 struct SyntheticScene {
-    camera_angle_x: f64,
+    camera_angle_x: Option<f64>,
     frames: Vec<FrameData>,
 }
 
 #[derive(serde::Deserialize)]
 struct FrameData {
+    fl_x: Option<f64>,
+    fl_y: Option<f64>,
+
+    cx: Option<f64>,
+    cy: Option<f64>,
+
     transform_matrix: Vec<Vec<f32>>,
     file_path: String,
 }
@@ -108,11 +114,14 @@ pub fn read_dataset(
         let mut train_views = vec![];
         let mut eval_views = vec![];
 
+        log::info!("Loading transforms_test.json");
         // Not entirely sure yet if we want to report stats on both test
         // and eval, atm this skips "transforms_test.json" even if it's there.
         let val_stream = read_transforms_file(archive, "transforms_val.json", &load_args).ok();
 
         for (i, handle) in train_handles.into_iter().enumerate() {
+            log::info!("Getting train img");
+
             if let Some(eval_period) = load_args.eval_split_every {
                 // Include extra eval images only when the dataset doesn't have them.
                 if i % eval_period == 0 && val_stream.is_some() {

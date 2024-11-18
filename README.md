@@ -16,7 +16,7 @@ _NOTE: This only works on desktop Chrome 129+ currently (Oct 2024). Firefox and 
 ## Features
 
 The demo can load pretrained ply splats, and can load datasets to train on. Currently only two formats are supported. A .zip file containing:
-- A transform_train.json and images, like the synthetic nerf scene dataset.
+- A transforms_train.json and images, like the synthetic nerf scene dataset.
 - An `images` & `sparse` folder with [`COLMAP`](https://github.com/colmap/colmap) data
 
 While training you can interact with the scene and see the training dynamics live, and compare the current rendering to training / eval views as the training progresses.

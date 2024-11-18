@@ -198,7 +198,7 @@ impl ViewerPanel for ScenePanel {
 Load a pretrained .ply file to view it
 
 Or load a dataset to train on. These are zip files with:
-    - a transform_train.json and images, like the synthetic NeRF dataset format.
+    - a transforms_train.json and images, like the synthetic NeRF dataset format.
     - COLMAP data, containing the `images` & `sparse` folder."#,
             );
 

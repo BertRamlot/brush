@@ -18,7 +18,10 @@ pub fn load_dataset(
     load_args: &LoadDatasetArgs,
 ) -> Result<DataStream<Dataset>> {
     nerf_synthetic::read_dataset(archive.clone(), load_args)
-        .or_else(|_| colmap::load_dataset(archive.clone(), load_args))
+        .or_else(|e| {
+            log::info!("Not a NeRF synthetic dataset ({e}), trying to load as Colmap.");
+            colmap::load_dataset(archive.clone(), load_args)
+        })
         .map_err(|_| {
             anyhow::anyhow!(
                 "Couldn't parse dataset as any format. Only some formats are supported."
