@@ -16,8 +16,9 @@ _NOTE: This only works on desktop Chrome 129+ currently (Oct 2024). Firefox and 
 ## Features
 
 The demo can load pretrained ply splats, and can load datasets to train on. Currently only two formats are supported. A .zip file containing:
-- A transforms_train.json and images, like the synthetic nerf scene dataset.
 - An `images` & `sparse` folder with [`COLMAP`](https://github.com/colmap/colmap) data
+- A .json and images, like the [nerfstudio format](https://docs.nerf.studio/quickstart/data_conventions.html).
+  - You can specify a custom transforms_train.json and transforms_eval.json split.
 
 While training you can interact with the scene and see the training dynamics live, and compare the current rendering to training / eval views as the training progresses.
 
@@ -72,7 +73,7 @@ Brush is split into various crates. A quick overview of the different responsibi
 - `brush-viewer` handles the UI and integrating the training loop.
 - `brush-android` is the binary target for running on android, while `brush-desktop` is for running both on web, and mac/Windows/Linux.
 - `brush-wgsl` handles some kernel inspection for generating CPU-side structs and interacing with [naga-oil](https://github.com/bevyengine/naga_oil) to handle shader imports.
-- `brush-dataset` handles importing different datasets like COLMAP or synthetic nerf data.
+- `brush-dataset` handles importing different training data formats.
 - `brush-prefix-sum` and `brush-sort` are only compute kernels and should be largely independent of Brush (other than `brush-wgsl`).
 - `rrfd` is a small extension of [`rfd`](https://github.com/PolyMeilex/rfd)
 

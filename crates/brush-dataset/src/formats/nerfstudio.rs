@@ -17,7 +17,7 @@ use tokio_stream::StreamExt;
 
 #[derive(serde::Deserialize, Clone)]
 #[allow(unused)] // not reading camera distortions yet.
-struct SyntheticScene {
+struct JsonScene {
     // Simple synthetic nerf camera model.
     camera_angle_x: Option<f64>,
     // Not really used atm.
@@ -92,7 +92,7 @@ struct FrameData {
 }
 
 fn read_transforms_file(
-    scene: SyntheticScene,
+    scene: JsonScene,
     transforms_path: PathBuf,
     archive: DatasetZip,
     load_args: &LoadDatasetArgs,
@@ -175,11 +175,10 @@ pub fn read_dataset<B: Backend>(
     load_args: &LoadDatasetArgs,
     device: &B::Device,
 ) -> Result<(DataStream<Splats<B>>, DataStream<Dataset>)> {
-    log::info!("Loading nerf synthetic dataset");
+    log::info!("Loading nerfstudio dataset");
 
     let transforms_path = archive.find_with_extension(".json", "_train")?;
-    let train_scene: SyntheticScene =
-        serde_json::from_reader(archive.file_at_path(&transforms_path)?)?;
+    let train_scene: JsonScene = serde_json::from_reader(archive.file_at_path(&transforms_path)?)?;
     let train_handles = read_transforms_file(
         train_scene.clone(),
         transforms_path.clone(),

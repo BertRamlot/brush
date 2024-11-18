@@ -15,10 +15,8 @@ pub fn load_dataset<B: Backend>(
     load_args: &LoadDatasetArgs,
     device: &B::Device,
 ) -> anyhow::Result<(DataStream<Splats<B>>, DataStream<Dataset>)> {
-    let streams = nerfstudio::read_dataset(archive.clone(), load_args, device).or_else(|e| {
-        log::info!("Not a NeRF synthetic dataset ({e}), trying to load as Colmap.");
-        colmap::load_dataset::<B>(archive.clone(), load_args, device)
-    });
+    let streams = nerfstudio::read_dataset(archive.clone(), load_args, device)
+        .or_else(|_| colmap::load_dataset::<B>(archive.clone(), load_args, device));
 
     let Ok(streams) = streams else {
         anyhow::bail!("Couldn't parse dataset as any format. Only some formats are supported.")
