@@ -298,7 +298,7 @@ impl SplatTrainer {
             self.sched_mean.step() * batch.scene_extent as f64,
             self.config.lr_rotation,
             // Scale is relative to the scene scale, but the exp() activation function
-            // means "offseting" all values also solves the learing rate scaling.
+            // means "offsetting" all values also solves the learning rate scaling.
             self.config.lr_scale,
             self.config.lr_coeffs_dc,
             self.config.lr_opac,
