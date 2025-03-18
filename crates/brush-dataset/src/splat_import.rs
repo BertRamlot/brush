@@ -88,10 +88,10 @@ impl TimeYield {
         self.tick += 1;
 
         // Only check every so many iterations as checking the time isn't super cheap either.
-        if self.tick % 1000 == 0 {
+        if self.tick % 5000 == 0 {
             let duration = web_time::Instant::now().duration_since(self.last_yield);
-            // Try to yield every 5 milliseconds to keep things responsive.
-            if duration.as_secs_f32() > 5e-3 {
+            // Try to yield every 10 milliseconds to keep things responsive.
+            if duration.as_secs_f32() > 1e-2 {
                 tokio_wasm::task::yield_now().await;
             }
         }
