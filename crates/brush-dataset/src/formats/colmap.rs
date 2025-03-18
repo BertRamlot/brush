@@ -245,8 +245,14 @@ pub(crate) async fn load_dataset<B: Backend>(
                     colors = colors.into_iter().step_by(subsample as usize * 3).collect();
                 }
 
-                let init_splat =
-                    Splats::from_raw(&positions, None, None, Some(&colors), None, &device);
+                let init_splat = Splats::from_raw(
+                    positions.iter().flat_map(|p| [p.x, p.y, p.z]).collect(),
+                    None,
+                    None,
+                    Some(colors),
+                    None,
+                    &device,
+                );
                 emitter
                     .emit(SplatMessage {
                         meta: crate::splat_import::ParseMetadata {

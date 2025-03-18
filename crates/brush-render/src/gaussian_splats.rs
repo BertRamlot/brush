@@ -11,7 +11,6 @@ use burn::{
     prelude::Backend,
     tensor::{Tensor, TensorData, TensorPrimitive, activation::sigmoid},
 };
-use glam::{Quat, Vec3};
 use rand::Rng;
 
 #[derive(Config)]
@@ -53,12 +52,12 @@ impl<B: Backend> Splats<B> {
         let min = bounds.min();
         let max = bounds.max();
 
-        let mut positions: Vec<Vec3> = Vec::with_capacity(num_points);
+        let mut positions: Vec<f32> = Vec::with_capacity(num_points);
         for _ in 0..num_points {
             let x = rng.random_range(min.x..max.x);
             let y = rng.random_range(min.y..max.y);
             let z = rng.random_range(min.z..max.z);
-            positions.push(Vec3::new(x, y, z));
+            positions.extend([x, y, z]);
         }
 
         let mut colors: Vec<f32> = Vec::with_capacity(num_points);
@@ -70,29 +69,20 @@ impl<B: Backend> Splats<B> {
             colors.push(g);
             colors.push(b);
         }
-
-        Self::from_raw(&positions, None, None, Some(&colors), None, device)
+        Self::from_raw(positions, None, None, Some(colors), None, device)
     }
 
     pub fn from_raw(
-        means: &[Vec3],
-        rotations: Option<&[Quat]>,
-        log_scales: Option<&[Vec3]>,
-        sh_coeffs: Option<&[f32]>,
-        raw_opacities: Option<&[f32]>,
+        means: Vec<f32>,
+        rotations: Option<Vec<f32>>,
+        log_scales: Option<Vec<f32>>,
+        sh_coeffs: Option<Vec<f32>>,
+        raw_opacities: Option<Vec<f32>>,
         device: &B::Device,
     ) -> Self {
-        let n_splats = means.len();
-
-        let means_tensor: Vec<f32> = means.iter().flat_map(|v| [v.x, v.y, v.z]).collect();
-        let means_tensor = Tensor::from_data(TensorData::new(means_tensor, [n_splats, 3]), device);
+        let n_splats = means.len() / 3;
 
         let rotations = if let Some(rotations) = rotations {
-            // Rasterizer expects quaternions in scalar form.
-            let rotations: Vec<f32> = rotations
-                .iter()
-                .flat_map(|v| [v.w, v.x, v.y, v.z])
-                .collect();
             Tensor::from_data(TensorData::new(rotations, [n_splats, 4]), device)
         } else {
             norm_vec(Tensor::random(
@@ -103,12 +93,11 @@ impl<B: Backend> Splats<B> {
         };
 
         let log_scales = if let Some(log_scales) = log_scales {
-            let log_scales: Vec<f32> = log_scales.iter().flat_map(|v| [v.x, v.y, v.z]).collect();
             Tensor::from_data(TensorData::new(log_scales, [n_splats, 3]), device)
         } else {
             let tree_pos: Vec<[f64; 3]> = means
-                .iter()
-                .map(|v| [v.x as f64, v.y as f64, v.z as f64])
+                .chunks(3)
+                .map(|v| [v[0] as f64, v[1] as f64, v[2] as f64])
                 .collect();
 
             let empty = vec![(); tree_pos.len()];
@@ -129,21 +118,8 @@ impl<B: Backend> Splats<B> {
                 .repeat_dim(1, 3)
         };
 
-        let sh_coeffs = if let Some(sh_coeffs) = sh_coeffs {
-            let n_coeffs = sh_coeffs.len() / n_splats;
-            Tensor::from_data(
-                TensorData::new(sh_coeffs.to_vec(), [n_splats, n_coeffs / 3, 3]),
-                device,
-            )
-        } else {
-            Tensor::<_, 1>::from_floats([0.5, 0.5, 0.5], device)
-                .unsqueeze::<3>()
-                .repeat_dim(0, n_splats)
-        };
-
         let raw_opacities = if let Some(raw_opacities) = raw_opacities {
-            Tensor::from_data(TensorData::new(raw_opacities.to_vec(), [n_splats]), device)
-                .require_grad()
+            Tensor::from_data(TensorData::new(raw_opacities, [n_splats]), device).require_grad()
         } else {
             Tensor::random(
                 [n_splats],
@@ -155,8 +131,20 @@ impl<B: Backend> Splats<B> {
             )
         };
 
+        let sh_coeffs = if let Some(sh_coeffs) = sh_coeffs {
+            let n_coeffs = sh_coeffs.len() / n_splats;
+            Tensor::from_data(
+                TensorData::new(sh_coeffs, [n_splats, n_coeffs / 3, 3]),
+                device,
+            )
+        } else {
+            Tensor::<_, 1>::from_floats([0.5, 0.5, 0.5], device)
+                .unsqueeze::<3>()
+                .repeat_dim(0, n_splats)
+        };
+
         Self::from_tensor_data(
-            means_tensor,
+            Tensor::from_data(TensorData::new(means, [n_splats, 3]), device),
             rotations,
             log_scales,
             sh_coeffs,

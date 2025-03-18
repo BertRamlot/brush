@@ -6,7 +6,7 @@ use burn::{
     prelude::Backend,
     tensor::{Tensor, TensorData},
 };
-use glam::{Quat, Vec3, Vec4};
+use glam::{Vec3, Vec4};
 use ply_rs::{
     parser::Parser,
     ply::{DefaultElement, ElementDef, Encoding, Header, Property, PropertyAccess},
@@ -229,12 +229,17 @@ fn parse_ply<T: AsyncBufRead + Unpin + 'static, B: Backend>(
                 continue;
             }
 
-            means.push(splat.mean);
+            means.extend([splat.mean.x, splat.mean.y, splat.mean.z]);
             if let Some(scales) = &mut log_scales {
-                scales.push(splat.log_scale);
+                scales.extend([splat.log_scale.x, splat.log_scale.y, splat.log_scale.z]);
             }
             if let Some(rotation) = &mut rotations {
-                rotation.push(splat.rotation);
+                rotation.extend([
+                    splat.rotation.w,
+                    splat.rotation.x,
+                    splat.rotation.y,
+                    splat.rotation.z,
+                ]);
             }
             if let Some(opacity) = &mut opacity {
                 opacity.push(splat.opacity);
@@ -245,11 +250,11 @@ fn parse_ply<T: AsyncBufRead + Unpin + 'static, B: Backend>(
 
             if (i - last_update) >= update_every || i == vertex.count - 1 {
                 let splats = Splats::from_raw(
-                    &means,
-                    rotations.as_deref(),
-                    log_scales.as_deref(),
-                    sh_coeffs.as_deref(),
-                    opacity.as_deref(),
+                    means.clone(),
+                    rotations.clone(),
+                    log_scales.clone(),
+                    sh_coeffs.clone(),
+                    opacity.clone(),
                     &device,
                 );
                 emitter
@@ -349,7 +354,7 @@ fn parse_compressed_ply<T: AsyncBufRead + Unpin + 'static, B: Backend>(
         let mut yielder = TimeYield::new();
 
         let parser = Parser::<QuantMeta>::new();
-        let mut quant_metas = vec![];
+        let mut quant_metas = Vec::with_capacity(quant_elem.count);
         for _ in 0..quant_elem.count {
             yielder.try_yield().await;
             let quant_meta = parse_elem(&mut reader, &parser, header.encoding, quant_elem).await?;
@@ -364,78 +369,92 @@ fn parse_compressed_ply<T: AsyncBufRead + Unpin + 'static, B: Backend>(
             anyhow::bail!("Second element should be vertex compression metadata!");
         }
 
-        let parser = Parser::<ParsedGaussian<true>>::new();
-        let mut means = Vec::with_capacity(vertex.count);
-        // Atm, unlike normal plys, these values aren't optional.
-        let mut log_scales = Vec::with_capacity(vertex.count);
-        let mut rotations = Vec::with_capacity(vertex.count);
-        let mut sh_coeffs = Vec::with_capacity(vertex.count);
-        let mut opacity = Vec::with_capacity(vertex.count);
-
-        let update_every = vertex.count.div_ceil(20);
-        let mut last_update = 0;
-
+        let mut color_splat = None;
         let mut valid = vec![true; vertex.count];
+        let mut sh_coeffs = Vec::with_capacity(vertex.count * 3);
 
         for i in 0..vertex.count {
             // Occasionally yield.
             yielder.try_yield().await;
 
-            // Doing this after first reading and parsing the points is quite wasteful, but
-            // we do need to advance the reader.
-            if let Some(subsample) = subsample_points {
-                if i % subsample as usize != 0 {
+            let update_every = vertex.count.div_ceil(20);
+            let mut last_update = 0;
+
+            for i in 0..vertex.count {
+                // Occasionally yield.
+                try_yield(i).await;
+
+                // Doing this after first reading and parsing the points is quite wasteful, but
+                // we do need to advance the reader.
+                if let Some(subsample) = subsample_points {
+                    if i % subsample as usize != 0 {
+                        continue;
+                    }
+                }
+
+                let quant_data = quant_metas
+                    .get(i / 256)
+                    .context("not enough quantization data to parse ply")?;
+
+                let splat = parse_elem(&mut reader, &parser, header.encoding, vertex).await?;
+
+                // Don't add invalid splats.
+                if !splat.is_finite() {
+                    valid[i] = false;
                     continue;
                 }
-            }
 
-            let quant_data = quant_metas
-                .get(i / 256)
-                .context("not enough quantization data to parse ply")?;
+                let mean = quant_data.mean.dequant(splat.mean);
+                means.extend([mean.x, mean.y, mean.z]);
 
-            let splat = parse_elem(&mut reader, &parser, header.encoding, vertex).await?;
+                let scale = quant_data.scale.dequant(splat.log_scale);
+                log_scales.extend([scale.x, scale.y, scale.z]);
+                rotations.extend([
+                    splat.rotation.w,
+                    splat.rotation.x,
+                    splat.rotation.y,
+                    splat.rotation.z,
+                ]);
 
-            // Don't add invalid splats.
-            if !splat.is_finite() {
-                valid[i] = false;
-                continue;
-            }
+                // Compressed ply specifies things in post-activated values. Convert to pre-activated values.
+                opacity.push(inverse_sigmoid(splat.opacity));
 
-            means.push(quant_data.mean.dequant(splat.mean));
+                // These come in as RGB colors. Convert to base SH coeffecients.
+                let sh_dc = rgb_to_sh(quant_data.color.dequant(splat.sh_dc));
+                sh_coeffs.extend([sh_dc.x, sh_dc.y, sh_dc.z]);
 
-            log_scales.push(quant_data.scale.dequant(splat.log_scale));
-            rotations.push(splat.rotation);
+                // Occasionally send some updated splats.
+                if (i - last_update) >= update_every || i == vertex.count - 1 {
+                    let splats = Splats::from_raw(
+                        means.clone(),
+                        Some(rotations.clone()),
+                        Some(log_scales.clone()),
+                        Some(sh_coeffs.clone()),
+                        Some(opacity.clone()),
+                        &device,
+                    );
 
-            // Compressed ply specifies things in post-activated values. Convert to pre-activated values.
-            opacity.push(inverse_sigmoid(splat.opacity));
+                    color_splat = Some(splats.clone());
 
-            // These come in as RGB colors. Convert to base SH coeffecients.
-            let sh_dc = rgb_to_sh(quant_data.color.dequant(splat.sh_dc));
-            sh_coeffs.extend([sh_dc.x, sh_dc.y, sh_dc.z]);
-
-            // Occasionally send some updated splats.
-            if (i - last_update) >= update_every || i == vertex.count - 1 {
-                emitter
-                    .emit(SplatMessage {
-                        meta: ParseMetadata {
-                            total_splats: vertex.count as u32,
-                            up_axis,
-                            frame_count: 0,
-                            current_frame: 0,
-                        },
-                        splats: Splats::from_raw(
-                            &means,
-                            Some(&rotations),
-                            Some(&log_scales),
-                            Some(&sh_coeffs),
-                            Some(&opacity),
-                            &device,
-                        ),
-                    })
-                    .await;
-                last_update = i;
+                    emitter
+                        .emit(SplatMessage {
+                            meta: ParseMetadata {
+                                total_splats: vertex.count as u32,
+                                up_axis,
+                                frame_count: 0,
+                                current_frame: 0,
+                            },
+                            splats,
+                        })
+                        .await;
+                    last_update = i;
+                }
             }
         }
+
+        let Some(splats) = color_splat else {
+            anyhow::bail!("No splat available in compressed ply file.");
+        };
 
         if let Some(sh_vals) = header.elements.get(2) {
             // Bit of a hack - use the unquantized parser as that handles SH values. Really we don't need
@@ -448,7 +467,7 @@ fn parse_compressed_ply<T: AsyncBufRead + Unpin + 'static, B: Backend>(
 
             let mut splat_index = 0;
 
-            let mut total_coeffs = vec![];
+            let mut total_coeffs = Vec::with_capacity(sh_vals.count * 45);
             for i in 0..sh_vals.count {
                 yielder.try_yield().await;
 
@@ -471,6 +490,19 @@ fn parse_compressed_ply<T: AsyncBufRead + Unpin + 'static, B: Backend>(
                 splat_index += 1;
             }
 
+            let num_splats = splats.num_splats() as usize;
+            let n_coeffs = total_coeffs.len() / num_splats;
+
+            let mut splats = splats;
+            // Apply new SH coeffs.
+            splats.sh_coeffs = splats.sh_coeffs.map(|_| {
+                Tensor::from_data(
+                    TensorData::new(total_coeffs, [num_splats, n_coeffs / 3, 3]),
+                    &device,
+                )
+            });
+
+            // Send updates splats.
             emitter
                 .emit(SplatMessage {
                     meta: ParseMetadata {
@@ -479,14 +511,7 @@ fn parse_compressed_ply<T: AsyncBufRead + Unpin + 'static, B: Backend>(
                         frame_count: 0,
                         current_frame: 0,
                     },
-                    splats: Splats::from_raw(
-                        &means,
-                        Some(&rotations),
-                        Some(&log_scales),
-                        Some(&total_coeffs),
-                        Some(&opacity),
-                        &device,
-                    ),
+                    splats,
                 })
                 .await;
         }
@@ -541,12 +566,12 @@ fn parse_delta_ply<T: AsyncBufRead + Unpin + 'static, B: Backend>(
             let mut means = Vec::with_capacity(element.count);
             let mut log_scales = properties
                 .contains("scale_0")
-                .then(|| Vec::with_capacity(element.count));
+                .then(|| Vec::with_capacity(element.count * 3));
             let mut rotations = properties
                 .contains("rot_0")
-                .then(|| Vec::with_capacity(element.count));
+                .then(|| Vec::with_capacity(element.count * 4));
             let mut sh_coeffs = (properties.contains("f_dc_0") || properties.contains("red"))
-                .then(|| Vec::with_capacity(element.count * 24));
+                .then(|| Vec::with_capacity(element.count * 16));
             let mut opacity = properties
                 .contains("opacity")
                 .then(|| Vec::with_capacity(element.count));
@@ -568,11 +593,11 @@ fn parse_delta_ply<T: AsyncBufRead + Unpin + 'static, B: Backend>(
                                     current_frame: frame,
                                 },
                                 splats: Splats::from_raw(
-                                    &means,
-                                    rotations.as_deref(),
-                                    log_scales.as_deref(),
-                                    sh_coeffs.as_deref(),
-                                    opacity.as_deref(),
+                                    means.clone(),
+                                    rotations.clone(),
+                                    log_scales.clone(),
+                                    sh_coeffs.clone(),
+                                    opacity.clone(),
                                     &device,
                                 ),
                             })
@@ -589,12 +614,17 @@ fn parse_delta_ply<T: AsyncBufRead + Unpin + 'static, B: Backend>(
 
                     let splat = parse_elem(&mut reader, &parser, header.encoding, element).await?;
 
-                    means.push(splat.mean);
+                    means.extend([splat.mean.x, splat.mean.y, splat.mean.z]);
                     if let Some(scales) = &mut log_scales {
-                        scales.push(splat.log_scale);
+                        scales.extend([splat.log_scale.x, splat.log_scale.y, splat.log_scale.z]);
                     }
                     if let Some(rotation) = &mut rotations {
-                        rotation.push(splat.rotation);
+                        rotation.extend([
+                            splat.rotation.w,
+                            splat.rotation.x,
+                            splat.rotation.y,
+                            splat.rotation.z,
+                        ]);
                     }
                     if let Some(opacity) = &mut opacity {
                         opacity.push(splat.opacity);
@@ -604,11 +634,11 @@ fn parse_delta_ply<T: AsyncBufRead + Unpin + 'static, B: Backend>(
                     }
                 }
                 let splats = Splats::from_raw(
-                    &means,
-                    rotations.as_deref(),
-                    log_scales.as_deref(),
-                    sh_coeffs.as_deref(),
-                    opacity.as_deref(),
+                    means.clone(),
+                    rotations.clone(),
+                    log_scales.clone(),
+                    sh_coeffs.clone(),
+                    opacity.clone(),
                     &device,
                 );
                 final_splat = Some(splats.clone());
@@ -647,36 +677,31 @@ fn parse_delta_ply<T: AsyncBufRead + Unpin + 'static, B: Backend>(
                         parse_elem(&mut reader, &parser, header.encoding, element).await?;
 
                     // Let's only animate transforms for now.
-                    means.push(splat_enc.mean * (meta_max.mean - meta_min.mean) + meta_min.mean);
+                    let mean = splat_enc.mean * (meta_max.mean - meta_min.mean) + meta_min.mean;
+                    means.extend([mean.x, mean.y, mean.z]);
 
                     if let Some(rotation) = rotations.as_mut() {
                         let val: Vec4 = splat_enc.rotation.into();
                         let val = val * (meta_max.rotation - meta_min.rotation) + meta_min.rotation;
-                        rotation.push(Quat::from_vec4(val));
+                        rotation.extend([val.w, val.x, val.y, val.z]);
                     }
 
                     if let Some(log_scales) = log_scales.as_mut() {
-                        log_scales.push(
-                            splat_enc.log_scale * (meta_max.scale - meta_min.scale)
-                                + meta_min.scale,
-                        );
+                        let scale = splat_enc.log_scale * (meta_max.scale - meta_min.scale)
+                            + meta_min.scale;
+
+                        log_scales.extend([scale.x, scale.y, scale.z]);
                     }
                     // Don't emit any intermediate states as it looks strange to have a torn state.
                 }
 
                 let n_splats = splats.num_splats() as usize;
-                let means_tensor: Vec<f32> = means.iter().flat_map(|v| [v.x, v.y, v.z]).collect();
-                let means =
-                    Tensor::from_data(TensorData::new(means_tensor, [n_splats, 3]), &device)
-                        + splats.means.val();
+                let means = Tensor::from_data(TensorData::new(means, [n_splats, 3]), &device)
+                    + splats.means.val();
 
                 // The encoding is just delta encoding in floats - nothing fancy
                 // like actually considering the quaternion transform.
                 let rotations = if let Some(rotations) = rotations {
-                    let rotations: Vec<f32> = rotations
-                        .into_iter()
-                        .flat_map(|v| [v.w, v.x, v.y, v.z])
-                        .collect();
                     Tensor::from_data(TensorData::new(rotations, [n_splats, 4]), &device)
                         + splats.rotation.val()
                 } else {
@@ -684,10 +709,6 @@ fn parse_delta_ply<T: AsyncBufRead + Unpin + 'static, B: Backend>(
                 };
 
                 let log_scales = if let Some(log_scales) = log_scales {
-                    let log_scales: Vec<f32> = log_scales
-                        .into_iter()
-                        .flat_map(|v| [v.x, v.y, v.z])
-                        .collect();
                     Tensor::from_data(TensorData::new(log_scales, [n_splats, 3]), &device)
                         + splats.log_scales.val()
                 } else {
