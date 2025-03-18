@@ -369,86 +369,88 @@ fn parse_compressed_ply<T: AsyncBufRead + Unpin + 'static, B: Backend>(
             anyhow::bail!("Second element should be vertex compression metadata!");
         }
 
+        let parser = Parser::<ParsedGaussian<true>>::new();
+        let mut means = Vec::with_capacity(vertex.count * 3);
+        // Atm, unlike normal plys, these values aren't optional.
+        let mut log_scales = Vec::with_capacity(vertex.count * 3);
+        let mut rotations = Vec::with_capacity(vertex.count * 4);
+        let mut opacity = Vec::with_capacity(vertex.count);
+        let mut sh_coeffs = Vec::with_capacity(vertex.count * 3);
+
         let mut color_splat = None;
         let mut valid = vec![true; vertex.count];
-        let mut sh_coeffs = Vec::with_capacity(vertex.count * 3);
+
+        let update_every = vertex.count.div_ceil(20);
+        let mut last_update = 0;
 
         for i in 0..vertex.count {
             // Occasionally yield.
             yielder.try_yield().await;
 
-            let update_every = vertex.count.div_ceil(20);
-            let mut last_update = 0;
-
-            for i in 0..vertex.count {
-                // Occasionally yield.
-                try_yield(i).await;
-
-                // Doing this after first reading and parsing the points is quite wasteful, but
-                // we do need to advance the reader.
-                if let Some(subsample) = subsample_points {
-                    if i % subsample as usize != 0 {
-                        continue;
-                    }
-                }
-
-                let quant_data = quant_metas
-                    .get(i / 256)
-                    .context("not enough quantization data to parse ply")?;
-
-                let splat = parse_elem(&mut reader, &parser, header.encoding, vertex).await?;
-
-                // Don't add invalid splats.
-                if !splat.is_finite() {
-                    valid[i] = false;
+            // Doing this after first reading and parsing the points is quite wasteful, but
+            // we do need to advance the reader.
+            if let Some(subsample) = subsample_points {
+                if i % subsample as usize != 0 {
                     continue;
                 }
+            }
 
-                let mean = quant_data.mean.dequant(splat.mean);
-                means.extend([mean.x, mean.y, mean.z]);
+            let quant_data = quant_metas
+                .get(i / 256)
+                .context("not enough quantization data to parse ply")?;
 
-                let scale = quant_data.scale.dequant(splat.log_scale);
-                log_scales.extend([scale.x, scale.y, scale.z]);
-                rotations.extend([
-                    splat.rotation.w,
-                    splat.rotation.x,
-                    splat.rotation.y,
-                    splat.rotation.z,
-                ]);
+            let splat = parse_elem(&mut reader, &parser, header.encoding, vertex).await?;
 
-                // Compressed ply specifies things in post-activated values. Convert to pre-activated values.
-                opacity.push(inverse_sigmoid(splat.opacity));
+            // Don't add invalid splats.
+            if !splat.is_finite() {
+                valid[i] = false;
+                continue;
+            }
 
-                // These come in as RGB colors. Convert to base SH coeffecients.
-                let sh_dc = rgb_to_sh(quant_data.color.dequant(splat.sh_dc));
-                sh_coeffs.extend([sh_dc.x, sh_dc.y, sh_dc.z]);
+            let mean = quant_data.mean.dequant(splat.mean);
+            means.extend([mean.x, mean.y, mean.z]);
 
-                // Occasionally send some updated splats.
-                if (i - last_update) >= update_every || i == vertex.count - 1 {
-                    let splats = Splats::from_raw(
-                        means.clone(),
-                        Some(rotations.clone()),
-                        Some(log_scales.clone()),
-                        Some(sh_coeffs.clone()),
-                        Some(opacity.clone()),
-                        &device,
-                    );
+            let scale = quant_data.scale.dequant(splat.log_scale);
+            log_scales.extend([scale.x, scale.y, scale.z]);
+            rotations.extend([
+                splat.rotation.w,
+                splat.rotation.x,
+                splat.rotation.y,
+                splat.rotation.z,
+            ]);
 
-                    color_splat = Some(splats.clone());
+            // Compressed ply specifies things in post-activated values. Convert to pre-activated values.
+            opacity.push(inverse_sigmoid(splat.opacity));
 
-                    emitter
-                        .emit(SplatMessage {
-                            meta: ParseMetadata {
-                                total_splats: vertex.count as u32,
-                                up_axis,
-                                frame_count: 0,
-                                current_frame: 0,
-                            },
-                            splats,
-                        })
-                        .await;
-                    last_update = i;
-                }
+            // These come in as RGB colors. Convert to base SH coeffecients.
+            let sh_dc = rgb_to_sh(quant_data.color.dequant(splat.sh_dc));
+            sh_coeffs.extend([sh_dc.x, sh_dc.y, sh_dc.z]);
+
+            // Occasionally send some updated splats.
+            if (i - last_update) >= update_every || i == vertex.count - 1 {
+                let splats = Splats::from_raw(
+                    means.clone(),
+                    Some(rotations.clone()),
+                    Some(log_scales.clone()),
+                    Some(sh_coeffs.clone()),
+                    Some(opacity.clone()),
+                    &device,
+                );
+
+                color_splat = Some(splats.clone());
+
+                emitter
+                    .emit(SplatMessage {
+                        meta: ParseMetadata {
+                            total_splats: vertex.count as u32,
+                            up_axis,
+                            frame_count: 0,
+                            current_frame: 0,
+                        },
+                        splats,
+                    })
+                    .await;
+                last_update = i;
             }
         }
 
