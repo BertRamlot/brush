@@ -256,11 +256,6 @@ pub(crate) async fn train_stream(
             };
             emitter.emit(message).await;
         }
-
-        const LOG_EVERY: u32 = 100;
-        if iter % LOG_EVERY == 0 {
-            log::info!("Completed training iteration {}.", iter);
-        }
     }
 
     Ok(())

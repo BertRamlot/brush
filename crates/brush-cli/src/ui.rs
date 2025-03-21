@@ -85,11 +85,12 @@ pub async fn process_ui(
 
     let mut duration = Duration::from_secs(0);
 
+    // TODO: Unify logging & CLI UI somehow.
     while let Some(msg) = stream.next().await {
         let msg = match msg {
             Ok(msg) => msg,
             Err(error) => {
-                log::error!("Error: {error:?}");
+                // Don't need to log this as it'll bubble up as an error.
                 let _ = sp.println(format!("❌ Error: {error:?}"));
                 return Err(error);
             }
@@ -111,10 +112,11 @@ pub async fn process_ui(
                 // I guess we're already showing a warning.
             }
             ProcessMessage::Dataset { data } => {
+                let train_views = data.train.views.len();
+                let eval_views = data.eval.as_ref().map_or(0, |v| v.views.len());
+                log::info!("Loading data... {train_views} training, {eval_views} eval views",);
                 main_spinner.set_message(format!(
-                    "Loading data... {} training, {} eval views",
-                    data.train.views.len(),
-                    data.eval.as_ref().map_or(0, |v| v.views.len()),
+                    "Loading data... {train_views} training, {eval_views} eval views",
                 ));
 
                 if let Some(val) = data.eval.as_ref() {
@@ -126,6 +128,7 @@ pub async fn process_ui(
                 }
             }
             ProcessMessage::DoneLoading { .. } => {
+                log::info!("Dataset loaded.");
                 main_spinner.set_message("Dataset loaded");
             }
             ProcessMessage::TrainStep {
@@ -138,16 +141,22 @@ pub async fn process_ui(
                 duration = total_elapsed;
             }
             ProcessMessage::RefineStep {
-                cur_splat_count, ..
+                cur_splat_count,
+                iter,
+                ..
             } => {
                 stats_spinner.set_message(format!("Current splat count {cur_splat_count}"));
                 // Do we show this info somewhere?
+                //
+                log::info!("Refine iter {iter}, {cur_splat_count} splats.");
             }
             ProcessMessage::EvalResult {
                 iter,
                 avg_psnr,
                 avg_ssim,
             } => {
+                log::info!("Eval iter {iter}: PSNR {avg_psnr}, ssim {avg_ssim}");
+
                 eval_spinner.set_message(format!(
                     "Eval iter {iter}: PSNR {avg_psnr}, ssim {avg_ssim}"
                 ));
