@@ -46,6 +46,7 @@ pub(crate) async fn train_stream(
     let mut dataset = Dataset::empty();
     let (mut splat_stream, mut data_stream) =
         brush_dataset::load_dataset(vfs.clone(), &process_args.load_config, &device).await?;
+    log::info!("Dataset loaded");
 
     // Read dataset stream.
     while let Some(d) = data_stream.next().await {

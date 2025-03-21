@@ -8,7 +8,11 @@ use burn_wgpu::WgpuDevice;
 use indicatif::{ProgressBar, ProgressStyle};
 use tokio_stream::StreamExt;
 
-pub async fn process_ui(source: DataSource, process_args: ProcessArgs, device: WgpuDevice) {
+pub async fn process_ui(
+    source: DataSource,
+    process_args: ProcessArgs,
+    device: WgpuDevice,
+) -> Result<(), anyhow::Error> {
     let main_spinner = ProgressBar::new_spinner().with_style(
         ProgressStyle::with_template("{spinner:.blue} {msg}")
             .expect("Invalid indacitif config")
@@ -85,8 +89,9 @@ pub async fn process_ui(source: DataSource, process_args: ProcessArgs, device: W
         let msg = match msg {
             Ok(msg) => msg,
             Err(error) => {
+                log::error!("Error: {error:?}");
                 let _ = sp.println(format!("❌ Error: {error:?}"));
-                break;
+                return Err(error);
             }
         };
 
@@ -155,4 +160,6 @@ pub async fn process_ui(source: DataSource, process_args: ProcessArgs, device: W
         "Training took {}",
         humantime::format_duration(duration_secs)
     ));
+
+    Ok(())
 }
