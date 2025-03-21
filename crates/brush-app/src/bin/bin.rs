@@ -34,7 +34,9 @@ fn main() -> MainResult {
             .expect("Failed to initialize tokio runtime");
 
         runtime.block_on(async {
-            env_logger::builder().target(env_logger::Target::Stdout);
+            env_logger::builder()
+                .target(env_logger::Target::Stdout)
+                .init();
 
             if args.with_viewer {
                 let icon = eframe::icon_data::from_png_bytes(

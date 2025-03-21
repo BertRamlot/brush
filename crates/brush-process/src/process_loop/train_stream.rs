@@ -246,12 +246,6 @@ pub(crate) async fn train_stream(
 
         // How frequently to update the UI after a training step.
         const UPDATE_EVERY: u32 = 5;
-
-        const LOG_EVERY: u32 = 100;
-        if iter % LOG_EVERY == 0 {
-            log::info!("Completed training iteration {}.", iter);
-        }
-
         if iter % UPDATE_EVERY == 0 || is_last_step {
             let message = ProcessMessage::TrainStep {
                 splats: Box::new(splats.valid()),
@@ -260,6 +254,11 @@ pub(crate) async fn train_stream(
                 total_elapsed: train_duration,
             };
             emitter.emit(message).await;
+        }
+
+        const LOG_EVERY: u32 = 100;
+        if iter % LOG_EVERY == 0 {
+            log::info!("Completed training iteration {}.", iter);
         }
     }
 
