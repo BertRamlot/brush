@@ -72,6 +72,7 @@ impl<BT: BoolElement> SplatBackwardOps<Self> for BBase<BT> {
             state.uniforms_buffer,
             state.compact_gid_from_isect,
             state.global_from_compact_gid,
+            state.uv_dither,
             state.tile_offsets,
             state.final_index,
             state.sh_degree,
@@ -87,8 +88,9 @@ pub struct GaussianBackwardState<B: Backend> {
     raw_opac: FloatTensor<B>,
 
     out_img: FloatTensor<B>,
-
     projected_splats: FloatTensor<B>,
+    uv_dither: FloatTensor<B>,
+
     uniforms_buffer: IntTensor<B>,
     compact_gid_from_isect: IntTensor<B>,
     global_from_compact_gid: IntTensor<B>,
@@ -211,6 +213,9 @@ impl<B: Backend + SplatBackwardOps<B> + SplatForward<B>, C: CheckpointStrategy>
 
         let wrapped_aux = RenderAux::<Self> {
             projected_splats: <Self as AutodiffBackend>::from_inner(aux.projected_splats.clone()),
+            visible: <Self as AutodiffBackend>::from_inner(aux.visible),
+            uv_dither: <Self as AutodiffBackend>::from_inner(aux.uv_dither.clone()),
+
             num_intersections: aux.num_intersections.clone(),
             num_visible: aux.num_visible.clone(),
             final_index: aux.final_index.clone(),
@@ -218,7 +223,6 @@ impl<B: Backend + SplatBackwardOps<B> + SplatForward<B>, C: CheckpointStrategy>
             compact_gid_from_isect: aux.compact_gid_from_isect.clone(),
             global_from_compact_gid: aux.global_from_compact_gid.clone(),
             uniforms_buffer: aux.uniforms_buffer.clone(),
-            visible: <Self as AutodiffBackend>::from_inner(aux.visible),
         };
 
         match prep_nodes {
@@ -240,6 +244,7 @@ impl<B: Backend + SplatBackwardOps<B> + SplatForward<B>, C: CheckpointStrategy>
                     tile_offsets: aux.tile_offsets,
                     compact_gid_from_isect: aux.compact_gid_from_isect,
                     global_from_compact_gid: aux.global_from_compact_gid,
+                    uv_dither: aux.uv_dither,
                 };
 
                 let out_img = prep.finish(state, out_img);
@@ -289,6 +294,7 @@ impl<BT: BoolElement> SplatBackwardOps<Self> for Fusion<BBase<BT>> {
                     quats: h.get_float_tensor::<BBase<BT>>(&state.quats.into_ir()),
                     raw_opac: h.get_float_tensor::<BBase<BT>>(&state.raw_opac.into_ir()),
                     out_img: h.get_float_tensor::<BBase<BT>>(&state.out_img.into_ir()),
+                    uv_dither: h.get_float_tensor::<BBase<BT>>(&state.uv_dither.into_ir()),
                     projected_splats: h
                         .get_float_tensor::<BBase<BT>>(&state.projected_splats.into_ir()),
                     uniforms_buffer: h

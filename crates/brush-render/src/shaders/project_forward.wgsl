@@ -64,9 +64,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3u) {
 
     // compute the projected mean
     let mean2d = uniforms.focal * mean_c.xy * (1.0 / mean_c.z) + uniforms.pixel_center;
-
-    // let opac = helpers::sigmoid(raw_opac);
-
     let radius = helpers::radius_from_cov(cov2d, opac);
 
     if radius <= 0 {

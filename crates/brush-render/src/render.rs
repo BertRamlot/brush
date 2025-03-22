@@ -285,6 +285,12 @@ pub(crate) fn render_forward<BT: BoolElement>(
         if bwd_info { DType::F32 } else { DType::U32 },
     );
 
+    let uv_dither = BBase::<BT>::float_random(
+        [img_size.y as usize, img_size.x as usize, 2].into(),
+        burn::tensor::Distribution::Normal(0.5, 0.2),
+        device,
+    );
+
     let mut bindings = vec![
         uniforms_buffer.clone().handle.binding(),
         compact_gid_from_isect.handle.clone().binding(),
@@ -305,6 +311,7 @@ pub(crate) fn render_forward<BT: BoolElement>(
         );
 
         bindings.push(global_from_compact_gid.handle.clone().binding());
+        bindings.push(uv_dither.clone().handle.binding());
         bindings.push(final_index.handle.clone().binding());
         bindings.push(visible.handle.clone().binding());
 
@@ -341,6 +348,7 @@ pub(crate) fn render_forward<BT: BoolElement>(
             compact_gid_from_isect,
             global_from_compact_gid,
             visible,
+            uv_dither,
             final_index,
         },
     )

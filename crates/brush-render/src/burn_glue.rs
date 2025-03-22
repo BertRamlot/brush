@@ -67,6 +67,7 @@ impl<BT: BoolElement> SplatForward<Self> for Fusion<BBase<BT>> {
                     compact_gid_from_isect,
                     global_from_compact_gid,
                     out_img,
+                    uv_dither,
                     visible,
                     final_index,
                 ] = outputs;
@@ -98,6 +99,7 @@ impl<BT: BoolElement> SplatForward<Self> for Fusion<BBase<BT>> {
                     aux.global_from_compact_gid,
                 );
 
+                h.register_float_tensor::<BBase<BT>>(&uv_dither.id, aux.uv_dither);
                 h.register_float_tensor::<BBase<BT>>(&visible.id, aux.visible);
                 h.register_int_tensor::<BBase<BT>>(&final_index.id, aux.final_index);
             }
@@ -131,10 +133,15 @@ impl<BT: BoolElement> SplatForward<Self> for Fusion<BBase<BT>> {
 
         let aux = RenderAux::<Self> {
             projected_splats: client.tensor_uninitialized(vec![num_points, proj_size], DType::F32),
+            visible: client.tensor_uninitialized(visible_shape, DType::F32),
+            uv_dither: client.tensor_uninitialized(
+                vec![img_size.y as usize, img_size.x as usize, 2],
+                DType::F32,
+            ),
+
             uniforms_buffer: client.tensor_uninitialized(vec![uniforms_size], DType::I32),
             num_intersections: client.tensor_uninitialized(vec![1], DType::I32),
             num_visible: client.tensor_uninitialized(vec![1], DType::I32),
-
             tile_offsets: client.tensor_uninitialized(
                 vec![(tile_bounds.y * tile_bounds.x) as usize + 1],
                 DType::I32,
@@ -142,8 +149,6 @@ impl<BT: BoolElement> SplatForward<Self> for Fusion<BBase<BT>> {
             compact_gid_from_isect: client
                 .tensor_uninitialized(vec![max_intersects as usize], DType::I32),
             global_from_compact_gid: client.tensor_uninitialized(vec![num_points], DType::I32),
-
-            visible: client.tensor_uninitialized(visible_shape, DType::F32),
             final_index: client.tensor_uninitialized(final_index_shape, DType::I32),
         };
 
@@ -165,6 +170,7 @@ impl<BT: BoolElement> SplatForward<Self> for Fusion<BBase<BT>> {
                 aux.compact_gid_from_isect.to_ir_out(),
                 aux.global_from_compact_gid.to_ir_out(),
                 out_img.to_ir_out(),
+                aux.uv_dither.to_ir_out(),
                 aux.visible.to_ir_out(),
                 aux.final_index.to_ir_out(),
             ],

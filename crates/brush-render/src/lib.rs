@@ -30,14 +30,15 @@ pub mod render;
 pub struct RenderAux<B: Backend> {
     /// The packed projected splat information, see `ProjectedSplat` in helpers.wgsl
     pub projected_splats: FloatTensor<B>,
+    pub visible: FloatTensor<B>,
+    pub uv_dither: FloatTensor<B>,
+
     pub uniforms_buffer: IntTensor<B>,
     pub num_intersections: IntTensor<B>,
     pub num_visible: IntTensor<B>,
     pub tile_offsets: IntTensor<B>,
     pub compact_gid_from_isect: IntTensor<B>,
     pub global_from_compact_gid: IntTensor<B>,
-
-    pub visible: FloatTensor<B>,
     pub final_index: IntTensor<B>,
 }
 

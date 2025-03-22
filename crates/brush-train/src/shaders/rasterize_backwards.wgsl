@@ -8,15 +8,17 @@
 @group(0) @binding(3) var<storage, read> projected_splats: array<helpers::ProjectedSplat>;
 
 @group(0) @binding(4) var<storage, read> final_index: array<i32>;
-@group(0) @binding(5) var<storage, read> output: array<vec4f>;
-@group(0) @binding(6) var<storage, read> v_output: array<vec4f>;
+@group(0) @binding(5) var<storage, read> uv_offsets: array<vec2f>;
+
+@group(0) @binding(6) var<storage, read> output: array<vec4f>;
+@group(0) @binding(7) var<storage, read> v_output: array<vec4f>;
 
 #ifdef HARD_FLOAT
-    @group(0) @binding(7) var<storage, read_write> v_splats: array<atomic<f32>>;
-    @group(0) @binding(8) var<storage, read_write> v_refine_grad: array<atomic<f32>>;
+    @group(0) @binding(8) var<storage, read_write> v_splats: array<atomic<f32>>;
+    @group(0) @binding(9) var<storage, read_write> v_refine_grad: array<atomic<f32>>;
 #else
-    @group(0) @binding(7) var<storage, read_write> v_splats: array<atomic<u32>>;
-    @group(0) @binding(8) var<storage, read_write> v_refine_grad: array<atomic<u32>>;
+    @group(0) @binding(8) var<storage, read_write> v_splats: array<atomic<u32>>;
+    @group(0) @binding(9) var<storage, read_write> v_refine_grad: array<atomic<u32>>;
 #endif
 
 const BATCH_SIZE = helpers::TILE_SIZE;
@@ -82,7 +84,7 @@ fn main(
     );
 
     let pix_id = pixel_coordi.x + pixel_coordi.y * img_size.x;
-    let pixel_coord = vec2f(pixel_coordi) + 0.5;
+    let pixel_coord = vec2f(pixel_coordi) + uv_offsets[pix_id];
 
     // return if out of bounds
     // keep not rasterizing threads around for reading data

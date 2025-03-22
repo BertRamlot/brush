@@ -9,8 +9,10 @@
     @group(0) @binding(4) var<storage, read_write> out_img: array<vec4f>;
 
     @group(0) @binding(5) var<storage, read> global_from_compact_gid: array<i32>;
-    @group(0) @binding(6) var<storage, read_write> final_index: array<i32>;
-    @group(0) @binding(7) var<storage, read_write> visible: array<f32>;
+    @group(0) @binding(6) var<storage, read> uv_offsets: array<vec2f>;
+
+    @group(0) @binding(7) var<storage, read_write> final_index: array<i32>;
+    @group(0) @binding(8) var<storage, read_write> visible: array<f32>;
 #else
     @group(0) @binding(4) var<storage, read_write> out_img: array<u32>;
 #endif
@@ -39,7 +41,13 @@ fn main(
     // Get index of tile being drawn.
     let pix_id = global_id.x + global_id.y * img_size.x;
     let tile_id = workgroup_id.x + workgroup_id.y * uniforms.tile_bounds.x;
-    let pixel_coord = vec2f(global_id.xy) + 0.5;
+    var pixel_coord = vec2f(global_id.xy);
+
+#ifdef BWD_INFO
+    pixel_coord += uv_offsets[pix_id];
+#else
+    pixel_coord += vec2f(0.5);
+#endif
 
     // return if out of bounds
     // keep not rasterizing threads around for reading data
